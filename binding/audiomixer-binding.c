@@ -15,30 +15,27 @@ static struct audiomixer *audiomixer;
 static afb_event_t controls_changed;
 static afb_event_t volume_changed;
 static afb_event_t mute_changed;
-static sd_event_source *controls_changed_source;
 
-static int
-audiomixer_controls_changed_deferred(sd_event_source *s, void *data)
+static void
+audiomixer_controls_changed_deferred(int signum, void *arg)
 {
+	AFB_DEBUG("controls changed");
 	afb_event_push(controls_changed, NULL);
-
-	sd_event_source_unref(controls_changed_source);
-	controls_changed_source = NULL;
-	return 0;
 }
 
 struct value_changed_data
 {
 	unsigned int change_mask;
 	struct mixer_control control;
-	sd_event_source *source;
 };
 
-static int
-audiomixer_value_changed_deferred(sd_event_source *s, void *data)
+static void
+audiomixer_value_changed_deferred(int signum, void *data)
 {
 	struct value_changed_data *d = data;
 	json_object *json;
+
+	AFB_DEBUG("value changed");
 
 	json = json_object_new_object();
 	json_object_object_add(json, "control",
@@ -54,18 +51,16 @@ audiomixer_value_changed_deferred(sd_event_source *s, void *data)
 		afb_event_push(mute_changed, json);
 	}
 
-	sd_event_source_unref(d->source);
 	free(d);
-	return 0;
 }
 
 /* called in audiomixer's thread */
 static void
 audiomixer_controls_changed(void *data)
 {
-	sd_event *e = afb_daemon_get_event_loop();
-	sd_event_add_defer(e, &controls_changed_source,
-		audiomixer_controls_changed_deferred, NULL);
+	afb_api_t api = data;
+	afb_api_queue_job (api, audiomixer_controls_changed_deferred, NULL,
+		(void *) 0x1, 0);
 }
 
 
@@ -75,15 +70,14 @@ audiomixer_value_changed(void *data,
 	unsigned int change_mask,
 	const struct mixer_control *control)
 {
-	sd_event *e = afb_daemon_get_event_loop();
+	afb_api_t api = data;
 	struct value_changed_data *d = calloc(1, sizeof(*d));
 
 	d->change_mask = change_mask;
 	d->control = *control;
 
-	if (sd_event_add_defer(e, &d->source,
-			audiomixer_value_changed_deferred, d) < 0)
-		free(d);
+	afb_api_queue_job (api, audiomixer_value_changed_deferred, d,
+		(void *) 0x1, 0);
 }
 
 static const struct audiomixer_events audiomixer_events = {
@@ -111,7 +105,7 @@ init(afb_api_t api)
 	audiomixer = audiomixer_new();
 	sd_event_add_exit(e, NULL, cleanup, NULL);
 
-	audiomixer_add_event_listener(audiomixer, &audiomixer_events, NULL);
+	audiomixer_add_event_listener(audiomixer, &audiomixer_events, api);
 
 	return 0;
 }
