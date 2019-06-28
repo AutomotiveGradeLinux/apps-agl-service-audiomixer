@@ -1,7 +1,6 @@
 PROJECT_TARGET_ADD(audiomixer-binding)
 
 	add_definitions(-DAFB_BINDING_VERSION=3)
-	add_definitions(-DBUILDING_APPFW_BINDING)
 
 	set(audiomixer_SOURCES
 		audiomixer-binding.c

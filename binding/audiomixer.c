@@ -10,12 +10,7 @@
 #include <pipewire/array.h>
 #include <pipewire/extensions/endpoint.h>
 
-#if !defined(BUILDING_APPFW_BINDING)
-#define debug(...) fprintf(stdout, __VA_ARGS__)
-#else
-#include <afb/afb-binding.h>
-#define debug(...) AFB_DEBUG(__VA_ARGS__)
-#endif
+#define debug(...) pw_log_debug(__VA_ARGS__)
 
 struct audiomixer
 {
