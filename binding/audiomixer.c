@@ -26,7 +26,6 @@ struct audiomixer
 	struct spa_hook remote_listener;
 
 	struct pw_core_proxy *core_proxy;
-	struct spa_hook remote_core_listener;
 	struct pw_registry_proxy *registry_proxy;
 	struct spa_hook registry_listener;
 
@@ -233,11 +232,11 @@ endpoint_param (void *object, int seq, uint32_t id,
 			return;
 		}
 
-		if (strcmp (name, "volume")) {
+		if (!strcmp (name, "volume")) {
 			spa_pod_get_int(&prop->value, &ctl->volume_control_id);
 			prop = spa_pod_object_find_prop(obj, NULL,
 				PW_ENDPOINT_PARAM_CONTROL_type);
-		} else if (strcmp (name, "mute")) {
+		} else if (!strcmp (name, "mute")) {
 			spa_pod_get_int(&prop->value, &ctl->mute_control_id);
 		}
 
@@ -247,7 +246,7 @@ endpoint_param (void *object, int seq, uint32_t id,
 		uint32_t tmp_id = -1;
 
 		/* verify conditions */
-		if (endpoint->state != EP_STATE_COLLECT_CONTROL ||
+		if (endpoint->state != EP_STATE_COLLECT_CONTROL &&
 		    endpoint->state != EP_STATE_ACTIVE) {
 			debug("endpoint_param Control: wrong state");
 			return;
@@ -440,6 +439,9 @@ audiomixer_new(void)
 	self->remote = pw_remote_new(self->core, NULL, 0);
 	pw_array_init(&self->endpoints, 1 * sizeof(void*));
 	pw_array_init(&self->all_mixer_controls, 8 * sizeof(void*));
+
+	pw_remote_add_listener(self->remote, &self->remote_listener,
+		&remote_events, self);
 
 	pw_module_load(self->core, "libpipewire-module-endpoint", NULL, NULL,
 		NULL, NULL);
