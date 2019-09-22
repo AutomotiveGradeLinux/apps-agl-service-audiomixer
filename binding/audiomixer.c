@@ -8,7 +8,7 @@
 #include "audiomixer.h"
 #include <pipewire/pipewire.h>
 #include <pipewire/array.h>
-#include <pipewire/extensions/endpoint.h>
+//#include <pipewire/extensions/endpoint.h>
 
 #define debug(...) pw_log_debug(__VA_ARGS__)
 
@@ -42,7 +42,7 @@ enum endpoint_state {
 struct endpoint
 {
 	struct audiomixer *audiomixer;
-	struct pw_endpoint_proxy *proxy;
+	//struct pw_endpoint_proxy *proxy;
 
 	struct pw_properties *properties;
 	enum endpoint_state state;
@@ -62,6 +62,7 @@ struct mixer_control_impl
 	uint32_t mute_control_id;
 };
 
+#if 0
 static void
 emit_controls_changed(struct audiomixer *self)
 {
@@ -347,12 +348,14 @@ struct pw_proxy_events proxy_events = {
 	.destroy = endpoint_proxy_destroyed,
 	.done = endpoint_proxy_done,
 };
+#endif
 
 static void
 registry_event_global(void *data, uint32_t id, uint32_t parent_id,
 		uint32_t permissions, uint32_t type, uint32_t version,
 		const struct spa_dict *props)
 {
+#if 0
 	struct audiomixer *self = data;
 	const char *media_class;
 	struct pw_proxy *proxy;
@@ -386,6 +389,7 @@ registry_event_global(void *data, uint32_t id, uint32_t parent_id,
 
 	pw_array_add_ptr(&self->endpoints, endpoint);
 	advance_endpoint_state(endpoint);
+#endif
 }
 
 
@@ -438,8 +442,8 @@ audiomixer_new(void)
 	pw_remote_add_listener(self->remote, &self->remote_listener,
 		&remote_events, self);
 
-	pw_module_load(self->core, "libpipewire-module-endpoint", NULL, NULL,
-		NULL, NULL);
+	// pw_module_load(self->core, "libpipewire-module-endpoint", NULL, NULL,
+	// 	NULL, NULL);
 	pw_thread_loop_start(self->main_loop);
 
 	return self;
@@ -556,6 +560,7 @@ audiomixer_change_volume(struct audiomixer *self,
 	const struct mixer_control *control,
 	double volume)
 {
+#if 0
 	const struct mixer_control_impl *impl =
 		(const struct mixer_control_impl *) control;
 	struct endpoint *endpoint = impl->endpoint;
@@ -570,6 +575,7 @@ audiomixer_change_volume(struct audiomixer *self,
 		NULL);
 	pw_endpoint_proxy_set_param(endpoint->proxy,
 		PW_ENDPOINT_PARAM_Control, 0, param);
+#endif
 }
 
 void
@@ -577,6 +583,7 @@ audiomixer_change_mute(struct audiomixer *self,
 	const struct mixer_control *control,
 	bool mute)
 {
+#if 0
 	const struct mixer_control_impl *impl =
 		(const struct mixer_control_impl *) control;
 	struct endpoint *endpoint = impl->endpoint;
@@ -591,4 +598,5 @@ audiomixer_change_mute(struct audiomixer *self,
 		NULL);
 	pw_endpoint_proxy_set_param(endpoint->proxy,
 		PW_ENDPOINT_PARAM_Control, 0, param);
+#endif
 }
