@@ -1,5 +1,6 @@
 /*
  * Copyright © 2019 Collabora Ltd.
+ * Copyright © 2019 Konsulko Group
  *   @author George Kiagiadakis <george.kiagiadakis@collabora.com>
  *
  * SPDX-License-Identifier: MIT
@@ -15,6 +16,13 @@ static struct audiomixer *audiomixer;
 static afb_event_t controls_changed;
 static afb_event_t volume_changed;
 static afb_event_t mute_changed;
+
+static const char *signalcomposer_events[] = {
+	"event.volume.up",
+	"event.volume.down",
+	"event.volume.mute",
+	NULL,
+};
 
 static void
 audiomixer_controls_changed_deferred(int signum, void *arg)
@@ -96,6 +104,28 @@ cleanup(sd_event_source *s, void *data)
 static int
 init(afb_api_t api)
 {
+	int ret;
+
+	ret = afb_daemon_require_api("signal-composer", 1);
+	if (ret) {
+		AFB_WARNING("unable to initialize signal-composer binding");
+	} else {
+		const char **tmp = signalcomposer_events;
+		json_object *args = json_object_new_object();
+		json_object *signals = json_object_new_array();
+
+		while (*tmp) {
+			json_object_array_add(signals, json_object_new_string(*tmp++));
+		}
+		json_object_object_add(args, "signal", signals);
+		if(json_object_array_length(signals)) {
+			afb_api_call_sync(api, "signal-composer", "subscribe",
+					  args, NULL, NULL, NULL);
+		} else {
+			json_object_put(args);
+		}
+	}
+
 	sd_event *e = afb_daemon_get_event_loop();
 
 	controls_changed = afb_api_make_event(api, "controls_changed");
@@ -319,6 +349,60 @@ unsubscribe_cb(afb_req_t request)
 		afb_req_success(request, NULL, "Unsubscribed");
 }
 
+static void
+onevent(afb_api_t api, const char *event, struct json_object *object)
+{
+	const struct mixer_control *ctl;
+	json_object *tmp = NULL;
+	const char *uid;
+	const char *value;
+
+	json_object_object_get_ex(object, "uid", &tmp);
+	if (tmp == NULL)
+		return;
+
+	uid = json_object_get_string(tmp);
+	if (strncmp(uid, "event.volume.", 13))
+		return;
+
+	json_object_object_get_ex(object, "value", &tmp);
+	if (tmp == NULL)
+		return;
+
+	value = json_object_get_string(tmp);
+	if (strncmp(value, "true", 4))
+		return;
+
+	audiomixer_lock(audiomixer);
+
+	ctl = audiomixer_find_control(audiomixer, "Master");
+	if (!ctl)
+		goto unlock;
+
+	if (!strcmp(uid, "event.volume.mute")) {
+		audiomixer_change_mute(audiomixer, ctl, !ctl->mute);
+	} else {
+		double volume = ctl->volume;
+
+		if (!strcmp(uid, "event.volume.up")) {
+			volume += 0.05; // up 5%
+			if (volume > 1.0)
+				volume = 1.0; // clamp to 100%
+		} else if (!strcmp(uid, "event.volume.down")) {
+			volume -= 0.05; // down 5%
+			if (volume < 0.0)
+				volume = 0.0; // clamp to 0%
+		} else {
+			AFB_WARNING("Unhandled signal-composer uid '%s'", uid);
+			goto unlock;
+		}
+		audiomixer_change_volume(audiomixer, ctl, volume);
+	}
+
+unlock:
+	audiomixer_unlock(audiomixer);
+}
+
 static const afb_verb_t verbs[]= {
 	{ .verb = "list_controls", .callback = list_controls_cb, .info = "List the available controls" },
 	{ .verb = "volume",        .callback = volume_cb,        .info = "Get/Set volume" },
@@ -332,5 +416,6 @@ const afb_binding_t afbBindingV3 = {
 	.api  = "audiomixer",
 	.specification = "AudioMixer API",
 	.verbs = verbs,
+	.onevent = onevent,
 	.init = init,
 };

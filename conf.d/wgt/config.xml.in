@@ -20,4 +20,7 @@
 		<param name="@WIDGET_ENTRY_POINT@" value="local" />
 	</feature>
 
+	<feature name="urn:AGL:widget:required-api">
+		<param name="signal-composer" value="ws" />
+	</feature>
 </widget>
