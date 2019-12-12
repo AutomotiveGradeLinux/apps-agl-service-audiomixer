@@ -6,443 +6,252 @@
  */
 
 #include "audiomixer.h"
+#include <wp/wp.h>
 #include <pipewire/pipewire.h>
-#include <pipewire/array.h>
-//#include <pipewire/extensions/endpoint.h>
-
-#define debug(...) pw_log_debug(__VA_ARGS__)
 
 struct audiomixer
 {
-	struct pw_thread_loop *main_loop;
+	WpCore *core;
+	GMainLoop *loop;
+	GMainContext *context;
+	GThread *thread;
+	GMutex lock;
+	GCond cond;
 
-	struct pw_core *core;
-	struct pw_remote *remote;
-	struct spa_hook remote_listener;
+	WpRemoteState state;
+	WpObjectManager *endpoints_om;
+	GPtrArray *mixer_controls;
 
-	struct pw_core_proxy *core_proxy;
-	struct pw_registry_proxy *registry_proxy;
-	struct spa_hook registry_listener;
-
-	struct pw_array endpoints;
-	struct pw_array all_mixer_controls;
+	/* just pointer, no ref */
+	WpSession *session;
 
 	const struct audiomixer_events *events;
 	void *events_data;
 };
 
-enum endpoint_state {
-	EP_STATE_INITIAL,
-	EP_STATE_COLLECT_ENUM_STREAM,
-	EP_STATE_COLLECT_ENUM_CONTROL,
-	EP_STATE_COLLECT_CONTROL,
-	EP_STATE_ACTIVE,
-};
-
-struct endpoint
-{
-	struct audiomixer *audiomixer;
-	//struct pw_endpoint_proxy *proxy;
-
-	struct pw_properties *properties;
-	enum endpoint_state state;
-
-	struct spa_hook proxy_listener;
-	struct spa_hook endpoint_listener;
-
-	struct pw_array mixer_controls;
-};
-
 struct mixer_control_impl
 {
 	struct mixer_control pub;
-	struct endpoint *endpoint;
-	uint32_t stream_id;
-	uint32_t volume_control_id;
-	uint32_t mute_control_id;
+	gboolean is_master;
+	guint32 id;
+	WpEndpoint *endpoint;
 };
 
-#if 0
-static void
-emit_controls_changed(struct audiomixer *self)
+struct action
 {
-	pw_thread_loop_signal(self->main_loop, false);
-
-	if (!self->events || !self->events->controls_changed)
-		return;
-
-	self->events->controls_changed(self->events_data);
-}
-
-static void
-emit_value_changed(struct audiomixer *self,
-	unsigned int change_mask,
-	struct mixer_control *ctl)
-{
-	if (!self->events || !self->events->value_changed)
-		return;
-
-	self->events->value_changed(self->events_data, change_mask, ctl);
-}
-
-static void
-advance_endpoint_state(struct endpoint *endpoint)
-{
-	debug("%p advance endpoint state, was:%d", endpoint, endpoint->state);
-
-	switch (endpoint->state) {
-	case EP_STATE_INITIAL:
-		endpoint->state = EP_STATE_COLLECT_ENUM_STREAM;
-		pw_endpoint_proxy_enum_params(endpoint->proxy, 0,
-			PW_ENDPOINT_PARAM_EnumStream, 0, -1, NULL);
-		pw_proxy_sync((struct pw_proxy *) endpoint->proxy, 0);
-		break;
-	case EP_STATE_COLLECT_ENUM_STREAM:
-		endpoint->state = EP_STATE_COLLECT_ENUM_CONTROL;
-		pw_endpoint_proxy_enum_params(endpoint->proxy, 0,
-			PW_ENDPOINT_PARAM_EnumControl, 0, -1, NULL);
-		pw_proxy_sync((struct pw_proxy *) endpoint->proxy, 0);
-		break;
-	case EP_STATE_COLLECT_ENUM_CONTROL: {
-		uint32_t ids[1] = { PW_ENDPOINT_PARAM_Control };
-
-		endpoint->state = EP_STATE_COLLECT_CONTROL;
-		pw_endpoint_proxy_subscribe_params(endpoint->proxy, ids, 1);
-		pw_proxy_sync((struct pw_proxy *) endpoint->proxy, 0);
-		break;
-	}
-	case EP_STATE_COLLECT_CONTROL: {
-		struct mixer_control_impl *ctl;
-		struct audiomixer *self = endpoint->audiomixer;
-
-		endpoint->state = EP_STATE_ACTIVE;
-		pw_array_for_each(ctl, &endpoint->mixer_controls) {
-			pw_array_add_ptr(&self->all_mixer_controls, ctl);
-		}
-		emit_controls_changed(self);
-		break;
-	}
-	default:
-		break;
-	}
-}
-
-static void
-endpoint_param (void *object, int seq, uint32_t id,
-		uint32_t index, uint32_t next,
-		const struct spa_pod *param)
-{
-	struct endpoint *endpoint = object;
-	struct mixer_control_impl *ctl;
-	const struct spa_pod_prop *prop;
-	struct spa_pod_object *obj = (struct spa_pod_object *) param;
-
-	if (!spa_pod_is_object(param)) {
-		debug("endpoint_param: bad param - not an object");
-		return;
-	}
-
-	switch (id) {
-	case PW_ENDPOINT_PARAM_EnumStream:
-		/* verify conditions */
-		if (endpoint->state != EP_STATE_COLLECT_ENUM_STREAM) {
-			debug("endpoint_param EnumStream: wrong state");
-			return;
-		}
-		if (SPA_POD_OBJECT_TYPE(obj) != PW_ENDPOINT_OBJECT_ParamStream) {
-			debug("endpoint_param EnumStream: invalid param");
-			return;
-		}
-
-		/* create new mixer control */
-		ctl = pw_array_add(&endpoint->mixer_controls, sizeof(*ctl));
-		ctl->endpoint = endpoint;
-
-		SPA_POD_OBJECT_FOREACH(obj, prop) {
-			switch (prop->key) {
-			case PW_ENDPOINT_PARAM_STREAM_id:
-				spa_pod_get_int(&prop->value, &ctl->stream_id);
-				break;
-			case PW_ENDPOINT_PARAM_STREAM_name:
-				spa_pod_copy_string(&prop->value,
-					SPA_N_ELEMENTS(ctl->pub.name),
-					ctl->pub.name);
-				break;
-			default:
-				break;
-			}
-		}
-		break;
-
-	case PW_ENDPOINT_PARAM_EnumControl: {
-		uint32_t tmp_id = -1;
-		const char *name = NULL;
-
-		/* verify conditions */
-		if (endpoint->state != EP_STATE_COLLECT_ENUM_CONTROL) {
-			debug("endpoint_param EnumControl: wrong state");
-			return;
-		}
-		if (SPA_POD_OBJECT_TYPE(obj) != PW_ENDPOINT_OBJECT_ParamControl) {
-			debug("endpoint_param EnumControl: invalid param");
-			return;
-		}
-
-		/* find the mixer control */
-		prop = spa_pod_object_find_prop(obj, NULL,
-			PW_ENDPOINT_PARAM_CONTROL_stream_id);
-		if (prop)
-			spa_pod_get_int(&prop->value, &tmp_id);
-		else {
-			debug("endpoint_param EnumControl: invalid control without stream");
-			return;
-		}
-
-		pw_array_for_each(ctl, &endpoint->mixer_controls) {
-			if (ctl->stream_id == tmp_id)
-				break;
-		}
-
-		/* check if we reached the end of the array
-		 * without finding the stream */
-		if (!pw_array_check(&endpoint->mixer_controls, ctl)) {
-			debug("endpoint_param EnumControl: could not find "
-				"stream id %u", tmp_id);
-			return;
-		}
-
-		/* store the control id based on the control's name */
-		prop = spa_pod_object_find_prop(obj, NULL,
-			PW_ENDPOINT_PARAM_CONTROL_name);
-		if (prop)
-			spa_pod_get_string(&prop->value, &name);
-		else {
-			debug("endpoint_param EnumControl: invalid control without name");
-			return;
-		}
-
-		prop = spa_pod_object_find_prop(obj, NULL,
-			PW_ENDPOINT_PARAM_CONTROL_id);
-		if (!prop) {
-			debug("endpoint_param EnumControl: invalid control without id");
-			return;
-		}
-
-		if (!strcmp (name, "volume")) {
-			spa_pod_get_int(&prop->value, &ctl->volume_control_id);
-			prop = spa_pod_object_find_prop(obj, NULL,
-				PW_ENDPOINT_PARAM_CONTROL_type);
-		} else if (!strcmp (name, "mute")) {
-			spa_pod_get_int(&prop->value, &ctl->mute_control_id);
-		}
-
-		break;
-	}
-	case PW_ENDPOINT_PARAM_Control: {
-		uint32_t tmp_id = -1;
-
-		/* verify conditions */
-		if (endpoint->state != EP_STATE_COLLECT_CONTROL &&
-		    endpoint->state != EP_STATE_ACTIVE) {
-			debug("endpoint_param Control: wrong state");
-			return;
-		}
-		if (SPA_POD_OBJECT_TYPE(obj) != PW_ENDPOINT_OBJECT_ParamControl) {
-			debug("endpoint_param Control: invalid param");
-			return;
-		}
-
-		/* match the control id and set the value */
-		prop = spa_pod_object_find_prop(obj, NULL,
-			PW_ENDPOINT_PARAM_CONTROL_id);
-		if (prop)
-			spa_pod_get_int(&prop->value, &tmp_id);
-		else {
-			debug("endpoint_param Control: invalid control without id");
-			return;
-		}
-
-		prop = spa_pod_object_find_prop(obj, NULL,
-			PW_ENDPOINT_PARAM_CONTROL_value);
-		if (!prop) {
-			debug("endpoint_param Control: invalid control without value");
-			return;
-		}
-
-		pw_array_for_each(ctl, &endpoint->mixer_controls) {
-			if (ctl->volume_control_id == tmp_id) {
-				spa_pod_get_double(&prop->value, &ctl->pub.volume);
-
-				if (endpoint->state == EP_STATE_ACTIVE) {
-					emit_value_changed(endpoint->audiomixer,
-						MIXER_CONTROL_CHANGE_FLAG_VOLUME,
-						&ctl->pub);
-				}
-				break;
-			} else if (ctl->mute_control_id == tmp_id) {
-				spa_pod_get_bool(&prop->value, &ctl->pub.mute);
-
-				if (endpoint->state == EP_STATE_ACTIVE) {
-					emit_value_changed(endpoint->audiomixer,
-						MIXER_CONTROL_CHANGE_FLAG_MUTE,
-						&ctl->pub);
-				}
-				break;
-			}
-		}
-
-		break;
-	}
-	default:
-		break;
-	}
-}
-
-struct pw_endpoint_proxy_events endpoint_events = {
-	PW_VERSION_ENDPOINT_PROXY_EVENTS,
-	.param = endpoint_param,
+	struct audiomixer *audiomixer;
+	union {
+		struct {
+			guint32 id;
+			gfloat volume;
+		} change_volume;
+		struct {
+			guint32 id;
+			gboolean mute;
+		} change_mute;
+	};
 };
 
 static void
-endpoint_proxy_destroyed(void *object)
+control_changed (WpEndpoint * ep, guint32 control_id, struct audiomixer * self)
 {
-	struct endpoint *endpoint = object;
-	struct audiomixer *self = endpoint->audiomixer;
 	struct mixer_control_impl *ctl;
-	struct mixer_control **ctlptr;
-	struct endpoint **epptr;
 
-	debug("%p endpoint destroyed", endpoint);
+	for (guint i = 0; i < self->mixer_controls->len; i++) {
+		ctl = g_ptr_array_index (self->mixer_controls, i);
+		if (ctl->endpoint != ep)
+			continue;
 
-	if (endpoint->properties)
-		pw_properties_free(endpoint->properties);
+		guint change_mask = 0;
 
-	pw_array_for_each(ctl, &endpoint->mixer_controls) {
-		pw_array_for_each(ctlptr, &self->all_mixer_controls) {
-			if (*ctlptr == &ctl->pub) {
-				pw_array_remove(&self->all_mixer_controls, ctlptr);
-				break;
-			}
-		}
-	}
-	emit_controls_changed(self);
-	pw_array_clear(&endpoint->mixer_controls);
-
-	pw_array_for_each(epptr, &self->endpoints) {
-		if (*epptr == endpoint) {
-			pw_array_remove(&self->endpoints, epptr);
+		switch (control_id) {
+		case WP_ENDPOINT_CONTROL_VOLUME: {
+			float vol;
+			wp_endpoint_get_control_float (ep, control_id, &vol);
+			ctl->pub.volume = vol;
+			change_mask = MIXER_CONTROL_CHANGE_FLAG_VOLUME;
 			break;
 		}
+		case WP_ENDPOINT_CONTROL_MUTE: {
+			gboolean mute;
+			wp_endpoint_get_control_boolean (ep, control_id, &mute);
+			ctl->pub.mute = mute;
+			change_mask = MIXER_CONTROL_CHANGE_FLAG_MUTE;
+			break;
+		}
+		default:
+			break;
+		}
+
+		if (self->events && self->events->value_changed)
+			self->events->value_changed (self->events_data, change_mask, &ctl->pub);
+		break;
+	}
+}
+
+/* called with self->lock locked */
+static void
+populate_controls (struct audiomixer * self, WpSession * session)
+{
+	guint32 def_id = wp_session_get_default_endpoint (session,
+			WP_DEFAULT_ENDPOINT_TYPE_AUDIO_SINK);
+	g_autoptr (GPtrArray) arr = wp_object_manager_get_objects (
+			self->endpoints_om, 0);
+
+	for (guint i = 0; i < arr->len; i++) {
+		WpEndpoint *ep = g_ptr_array_index (arr, i);
+		guint32 id = wp_proxy_get_global_id (WP_PROXY (ep));
+		struct mixer_control_impl *mixctl = NULL;
+		gfloat volume;
+		gboolean mute;
+
+		if (id != def_id)
+			continue;
+
+		wp_endpoint_get_control_float (ep, WP_ENDPOINT_CONTROL_VOLUME, &volume);
+		wp_endpoint_get_control_boolean (ep, WP_ENDPOINT_CONTROL_MUTE, &mute);
+
+		mixctl = g_new0 (struct mixer_control_impl, 1);
+		strncpy (mixctl->pub.name, "Master", sizeof (mixctl->pub.name));
+		mixctl->pub.volume = volume;
+		mixctl->pub.mute = mute;
+		mixctl->is_master = TRUE;
+		mixctl->id = id;
+		mixctl->endpoint = g_object_ref (ep);
+		g_ptr_array_add (self->mixer_controls, mixctl);
+
+		g_signal_connect (ep, "control-changed", (GCallback) control_changed,
+			self);
+
+		/* wake up audiomixer_ensure_controls() */
+		g_cond_broadcast (&self->cond);
+		break;
 	}
 }
 
 static void
-endpoint_proxy_done(void *object, int seq)
+default_endpoint_changed (WpSession * session, WpDefaultEndpointType type,
+		guint32 new_id, struct audiomixer * self)
 {
-	struct endpoint *endpoint = object;
-	advance_endpoint_state(endpoint);
-}
-
-struct pw_proxy_events proxy_events = {
-	PW_VERSION_PROXY_EVENTS,
-	.destroy = endpoint_proxy_destroyed,
-	.done = endpoint_proxy_done,
-};
-#endif
-
-static void
-registry_event_global(void *data, uint32_t id, uint32_t parent_id,
-		uint32_t permissions, uint32_t type, uint32_t version,
-		const struct spa_dict *props)
-{
-#if 0
-	struct audiomixer *self = data;
-	const char *media_class;
-	struct pw_proxy *proxy;
-	struct endpoint *endpoint;
-
-	if (type != PW_TYPE_INTERFACE_Endpoint)
+	if (session != self->session || type != WP_DEFAULT_ENDPOINT_TYPE_AUDIO_SINK)
 		return;
 
-	/* we are only interested in mixer endpoints */
-	media_class = props ? spa_dict_lookup(props, "media.class") : NULL;
-	if (!media_class || strcmp(media_class, "Mixer/Audio") != 0)
-		return;
+	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
 
-	proxy = pw_registry_proxy_bind(self->registry_proxy,
-		id, type, PW_VERSION_ENDPOINT, sizeof(struct endpoint));
+	g_ptr_array_set_size (self->mixer_controls, 0);
+	populate_controls (self, session);
 
-	endpoint = pw_proxy_get_user_data(proxy);
-	endpoint->audiomixer = self;
-	endpoint->proxy = (struct pw_endpoint_proxy *) proxy;
-	endpoint->properties = props ? pw_properties_new_dict(props) : NULL;
-	endpoint->state = EP_STATE_INITIAL;
-	pw_array_init(&endpoint->mixer_controls, 4 * sizeof(struct mixer_control));
-
-	pw_proxy_add_listener(proxy, &endpoint->proxy_listener,
-		&proxy_events, endpoint);
-	pw_endpoint_proxy_add_listener(endpoint->proxy,
-		&endpoint->endpoint_listener,
-		&endpoint_events, endpoint);
-
-	debug("%p added endpoint: %u", endpoint, id);
-
-	pw_array_add_ptr(&self->endpoints, endpoint);
-	advance_endpoint_state(endpoint);
-#endif
+	if (self->events && self->events->controls_changed)
+		self->events->controls_changed (self->events_data);
 }
 
-
-static const struct pw_registry_proxy_events registry_events = {
-	PW_VERSION_REGISTRY_PROXY_EVENTS,
-	.global = registry_event_global,
-};
-
 static void
-on_remote_state_changed(void *data, enum pw_remote_state old,
-		enum pw_remote_state state, const char *error)
+sessions_changed (WpObjectManager * om, struct audiomixer * self)
 {
-	struct audiomixer *self = data;
+	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
+	g_autoptr (WpSession) session = NULL;
+	g_autoptr (GPtrArray) arr = NULL;
 
-	if (state == PW_REMOTE_STATE_CONNECTED) {
-		self->core_proxy = pw_remote_get_core_proxy(self->remote);
-		self->registry_proxy = pw_core_proxy_get_registry(
-			self->core_proxy, PW_VERSION_REGISTRY_PROXY, 0);
-		pw_registry_proxy_add_listener(self->registry_proxy,
-			&self->registry_listener,
-			&registry_events, self);
+	g_ptr_array_set_size (self->mixer_controls, 0);
+
+	/* normally there is only 1 session */
+	arr = wp_object_manager_get_objects (om, 0);
+	if (arr->len > 0)
+		session = WP_SESSION (g_object_ref (g_ptr_array_index (arr, 0)));
+
+	if (session)
+		populate_controls (self, session);
+
+	/* just to be safe in case there are more sessions around */
+	if (session != self->session) {
+		g_signal_connect (session, "default-endpoint-changed",
+			(GCallback) default_endpoint_changed, self);
+		self->session = session;
 	}
 
-	pw_thread_loop_signal(self->main_loop, false);
+	if (self->events && self->events->controls_changed)
+		self->events->controls_changed (self->events_data);
 }
 
-static const struct pw_remote_events remote_events = {
-	PW_VERSION_REMOTE_EVENTS,
-	.state_changed = on_remote_state_changed,
-};
+static void
+remote_state_changed (WpCore *core, WpRemoteState state,
+	struct audiomixer * self)
+{
+	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
+	self->state = state;
+	g_cond_broadcast (&self->cond);
+}
+
+static void *
+audiomixer_thread (struct audiomixer * self)
+{
+	g_autoptr (WpObjectManager) sessions_om = wp_object_manager_new ();
+	g_autoptr (WpObjectManager) endpoints_om =
+			self->endpoints_om = wp_object_manager_new ();
+	GVariantBuilder b;
+
+	g_main_context_push_thread_default (self->context);
+
+	/* install object manager for sessions */
+	wp_object_manager_add_proxy_interest (sessions_om, PW_TYPE_INTERFACE_Session,
+		NULL, WP_PROXY_FEATURE_INFO | WP_PROXY_SESSION_FEATURE_DEFAULT_ENDPOINT);
+	g_signal_connect (sessions_om, "objects-changed",
+		(GCallback) sessions_changed, self);
+	wp_core_install_object_manager (self->core, sessions_om);
+
+	/* install object manager for Audio/Sink endpoints */
+	g_variant_builder_init (&b, G_VARIANT_TYPE ("aa{sv}"));
+	g_variant_builder_open (&b, G_VARIANT_TYPE_VARDICT);
+	g_variant_builder_add (&b, "{sv}", "type",
+		g_variant_new_int32 (WP_OBJECT_MANAGER_CONSTRAINT_PW_GLOBAL_PROPERTY));
+	g_variant_builder_add (&b, "{sv}", "name",
+		g_variant_new_string (PW_KEY_MEDIA_CLASS));
+	g_variant_builder_add (&b, "{sv}", "value",
+		g_variant_new_string ("Audio/Sink"));
+	g_variant_builder_close (&b);
+
+	wp_object_manager_add_proxy_interest (self->endpoints_om,
+		PW_TYPE_INTERFACE_Endpoint,
+		g_variant_builder_end (&b),
+		WP_PROXY_FEATURE_INFO | WP_PROXY_ENDPOINT_FEATURE_CONTROLS);
+	wp_core_install_object_manager (self->core, self->endpoints_om);
+
+	g_signal_connect (self->core, "remote-state-changed",
+		(GCallback) remote_state_changed, self);
+
+	g_main_loop_run (self->loop);
+	g_main_context_pop_thread_default (self->context);
+
+	return NULL;
+}
+
+static void
+mixer_control_impl_free (struct mixer_control_impl * impl)
+{
+	if (impl->endpoint)
+		g_signal_handlers_disconnect_matched (impl->endpoint,
+			G_SIGNAL_MATCH_FUNC, 0, 0, NULL, control_changed, NULL);
+	g_clear_object (&impl->endpoint);
+	g_free (impl);
+}
 
 struct audiomixer *
-audiomixer_new(void)
+audiomixer_new (void)
 {
-	struct audiomixer *self;
-	struct pw_loop *loop;
+	struct audiomixer *self = calloc(1, sizeof(struct audiomixer));
 
-	pw_init(NULL, NULL);
+	g_mutex_init (&self->lock);
+	g_cond_init (&self->cond);
+	self->context = g_main_context_new ();
+	self->loop = g_main_loop_new (self->context, FALSE);
+	self->core = wp_core_new (self->context, NULL);
 
-	self = calloc(1, sizeof(struct audiomixer));
-	loop = pw_loop_new(NULL);
-	self->main_loop = pw_thread_loop_new(loop, "audiomixer-loop");
-	self->core = pw_core_new(loop, NULL, 0);
-	self->remote = pw_remote_new(self->core, NULL, 0);
-	pw_array_init(&self->endpoints, 1 * sizeof(void*));
-	pw_array_init(&self->all_mixer_controls, 8 * sizeof(void*));
+	self->state = WP_REMOTE_STATE_UNCONNECTED;
+	self->mixer_controls = g_ptr_array_new_with_free_func (
+		(GDestroyNotify) mixer_control_impl_free);
 
-	pw_remote_add_listener(self->remote, &self->remote_listener,
-		&remote_events, self);
-
-	// pw_module_load(self->core, "libpipewire-module-endpoint", NULL, NULL,
-	// 	NULL, NULL);
-	pw_thread_loop_start(self->main_loop);
+	self->thread = g_thread_new ("audiomixer", (GThreadFunc) audiomixer_thread,
+		self);
 
 	return self;
 }
@@ -450,69 +259,68 @@ audiomixer_new(void)
 void
 audiomixer_free(struct audiomixer *self)
 {
-	struct pw_loop *loop;
+	g_main_loop_quit (self->loop);
+	g_thread_join (self->thread);
 
-	pw_thread_loop_lock(self->main_loop);
-	self->events = NULL;
-	self->events_data = NULL;
-	pw_remote_disconnect(self->remote);
-	pw_thread_loop_unlock(self->main_loop);
-	pw_thread_loop_stop(self->main_loop);
+	g_ptr_array_unref (self->mixer_controls);
+	g_object_unref (self->core);
+	g_main_loop_unref (self->loop);
+	g_main_context_unref (self->context);
+	g_cond_clear (&self->cond);
+	g_mutex_clear (&self->lock);
 
-	pw_array_clear(&self->endpoints);
-	pw_array_clear(&self->all_mixer_controls);
-	pw_remote_destroy(self->remote);
-	pw_core_destroy(self->core);
-
-	loop = pw_thread_loop_get_loop(self->main_loop);
-	pw_thread_loop_destroy(self->main_loop);
-	pw_loop_destroy(loop);
-
-	free(self);
+	free (self);
 }
 
 void
 audiomixer_lock(struct audiomixer *self)
 {
-	pw_thread_loop_lock(self->main_loop);
+	g_mutex_lock (&self->lock);
 }
 
 void
 audiomixer_unlock(struct audiomixer *self)
 {
-	pw_thread_loop_unlock(self->main_loop);
+	g_mutex_unlock (&self->lock);
+}
+
+static gboolean
+connect_in_idle (struct audiomixer * self)
+{
+	wp_core_connect (self->core);
+	return G_SOURCE_REMOVE;
 }
 
 int
 audiomixer_ensure_connected(struct audiomixer *self, int timeout_sec)
 {
-	enum pw_remote_state state;
-	int res;
+	gint64 end_time = g_get_monotonic_time () + timeout_sec * G_TIME_SPAN_SECOND;
 
-	state = pw_remote_get_state(self->remote, NULL);
-	if (state == PW_REMOTE_STATE_CONNECTED)
+	/* already connected */
+	if (self->state == WP_REMOTE_STATE_CONNECTED)
 		return 0;
 
-	if ((res = pw_remote_connect(self->remote)) < 0)
-		return res;
+	/* if disconnected, for any reason, try to connect again */
+	if (self->state != WP_REMOTE_STATE_CONNECTING)
+		wp_core_idle_add (self->core, (GSourceFunc) connect_in_idle, self, NULL);
 
 	while (true) {
-		state = pw_remote_get_state(self->remote, NULL);
-		if (state == PW_REMOTE_STATE_CONNECTED)
-			return 0;
-		else if (state == PW_REMOTE_STATE_ERROR)
-			return -EIO;
-
-		if (pw_thread_loop_timed_wait(self->main_loop, timeout_sec) != 0)
+		if (!g_cond_wait_until (&self->cond, &self->lock, end_time))
 			return -ETIMEDOUT;
+
+		if (self->state == WP_REMOTE_STATE_CONNECTED)
+			return 0;
+		else if (self->state == WP_REMOTE_STATE_ERROR)
+			return -EIO;
 	}
 }
 
 int
 audiomixer_ensure_controls(struct audiomixer *self, int timeout_sec)
 {
-	while (pw_array_get_len(&self->all_mixer_controls, void*) == 0) {
-		if (pw_thread_loop_timed_wait(self->main_loop, timeout_sec) != 0)
+	gint64 end_time = g_get_monotonic_time () + timeout_sec * G_TIME_SPAN_SECOND;
+	while (self->mixer_controls->len == 0) {
+		if (!g_cond_wait_until (&self->cond, &self->lock, end_time))
 			return -ETIMEDOUT;
 	}
 	return 0;
@@ -522,23 +330,19 @@ const struct mixer_control **
 audiomixer_get_active_controls(struct audiomixer *self,
 	unsigned int *n_controls)
 {
-	const struct mixer_control **ret;
-
-	*n_controls = pw_array_get_len(&self->all_mixer_controls, void*);
-	ret = (const struct mixer_control **)
-		pw_array_first(&self->all_mixer_controls);
-
-	return ret;
+	*n_controls = self->mixer_controls->len;
+	return (const struct mixer_control **) self->mixer_controls->pdata;
 }
 
 const struct mixer_control *
 audiomixer_find_control(struct audiomixer *self, const char *name)
 {
-	struct mixer_control **ctlptr;
+	struct mixer_control *ctl;
 
-	pw_array_for_each(ctlptr, &self->all_mixer_controls) {
-		if (!strcmp((*ctlptr)->name, name)) {
-			return *ctlptr;
+	for (guint i = 0; i < self->mixer_controls->len; i++) {
+		ctl = g_ptr_array_index (self->mixer_controls, i);
+		if (!strcmp(ctl->name, name)) {
+			return ctl;
 		}
 	}
 	return NULL;
@@ -553,27 +357,56 @@ audiomixer_add_event_listener(struct audiomixer *self,
 	self->events_data = data;
 }
 
+static gboolean
+do_change_volume (struct action * action)
+{
+	struct mixer_control_impl *ctl;
+	struct audiomixer *self = action->audiomixer;
+
+	for (guint i = 0; i < self->mixer_controls->len; i++) {
+		ctl = g_ptr_array_index (self->mixer_controls, i);
+		if (ctl->id != action->change_volume.id)
+			continue;
+		if (ctl->is_master)
+			wp_endpoint_set_control_float (ctl->endpoint,
+				WP_ENDPOINT_CONTROL_VOLUME, action->change_volume.volume);
+	}
+	return G_SOURCE_REMOVE;
+}
+
 void
 audiomixer_change_volume(struct audiomixer *self,
 	const struct mixer_control *control,
 	double volume)
 {
-#if 0
 	const struct mixer_control_impl *impl =
 		(const struct mixer_control_impl *) control;
-	struct endpoint *endpoint = impl->endpoint;
-	char buffer[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, 1024);
-	struct spa_pod *param;
+	struct action * action;
 
-	param = spa_pod_builder_add_object(&b,
-		PW_ENDPOINT_OBJECT_ParamControl, PW_ENDPOINT_PARAM_Control,
-		PW_ENDPOINT_PARAM_CONTROL_id, SPA_POD_Int(impl->volume_control_id),
-		PW_ENDPOINT_PARAM_CONTROL_value, SPA_POD_Double(volume),
-		NULL);
-	pw_endpoint_proxy_set_param(endpoint->proxy,
-		PW_ENDPOINT_PARAM_Control, 0, param);
-#endif
+	/* schedule the action to run on the audiomixer thread */
+	action = g_new0 (struct action, 1);
+	action->audiomixer = self;
+	action->change_volume.id = impl->id;
+	action->change_volume.volume = (gfloat) volume;
+	wp_core_idle_add (self->core, (GSourceFunc) do_change_volume, action,
+		g_free);
+}
+
+static gboolean
+do_change_mute (struct action * action)
+{
+	struct mixer_control_impl *ctl;
+	struct audiomixer *self = action->audiomixer;
+
+	for (guint i = 0; i < self->mixer_controls->len; i++) {
+		ctl = g_ptr_array_index (self->mixer_controls, i);
+		if (ctl->id != action->change_mute.id)
+			continue;
+		if (ctl->is_master)
+			wp_endpoint_set_control_boolean (ctl->endpoint,
+				WP_ENDPOINT_CONTROL_MUTE, action->change_mute.mute);
+	}
+	return G_SOURCE_REMOVE;
 }
 
 void
@@ -581,20 +414,15 @@ audiomixer_change_mute(struct audiomixer *self,
 	const struct mixer_control *control,
 	bool mute)
 {
-#if 0
 	const struct mixer_control_impl *impl =
 		(const struct mixer_control_impl *) control;
-	struct endpoint *endpoint = impl->endpoint;
-	char buffer[1024];
-	struct spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, 1024);
-	struct spa_pod *param;
+	struct action * action;
 
-	param = spa_pod_builder_add_object(&b,
-		PW_ENDPOINT_OBJECT_ParamControl, PW_ENDPOINT_PARAM_Control,
-		PW_ENDPOINT_PARAM_CONTROL_id, SPA_POD_Int(impl->mute_control_id),
-		PW_ENDPOINT_PARAM_CONTROL_value, SPA_POD_Bool(mute),
-		NULL);
-	pw_endpoint_proxy_set_param(endpoint->proxy,
-		PW_ENDPOINT_PARAM_Control, 0, param);
-#endif
+	/* schedule the action to run on the audiomixer thread */
+	action = g_new0 (struct action, 1);
+	action->audiomixer = self;
+	action->change_mute.id = impl->id;
+	action->change_mute.mute = mute;
+	wp_core_idle_add (self->core, (GSourceFunc) do_change_mute, action,
+		g_free);
 }
