@@ -19,11 +19,12 @@ struct audiomixer
 	GCond cond;
 
 	WpRemoteState state;
-	WpObjectManager *endpoints_om;
 	GPtrArray *mixer_controls;
+	GWeakRef session;
 
-	/* just pointer, no ref */
-	WpSession *session;
+	/* ref held in the thread function */
+	WpObjectManager *sessions_om;
+	WpObjectManager *endpoints_om;
 
 	const struct audiomixer_events *events;
 	void *events_data;
@@ -91,41 +92,95 @@ control_changed (WpEndpoint * ep, guint32 control_id, struct audiomixer * self)
 
 /* called with self->lock locked */
 static void
-populate_controls (struct audiomixer * self, WpSession * session)
+check_and_populate_controls (struct audiomixer * self)
 {
-	guint32 def_id = wp_session_get_default_endpoint (session,
-			WP_DEFAULT_ENDPOINT_TYPE_AUDIO_SINK);
-	g_autoptr (GPtrArray) arr = wp_object_manager_get_objects (
-			self->endpoints_om, 0);
+	g_autoptr (WpSession) session = NULL;
+	g_autoptr (WpEndpoint) def_ep = NULL;
+	guint32 def_id = 0;
+	struct mixer_control_impl *master_ctl = NULL;
 
-	for (guint i = 0; i < arr->len; i++) {
-		WpEndpoint *ep = g_ptr_array_index (arr, i);
-		guint32 id = wp_proxy_get_global_id (WP_PROXY (ep));
+	/* find the session */
+	session = g_weak_ref_get (&self->session);
+
+	/* find the default audio sink endpoint */
+	if (session) {
+		g_autoptr (GPtrArray) arr =
+				wp_object_manager_get_objects (self->endpoints_om, 0);
+		def_id = wp_session_get_default_endpoint (session,
+				WP_DEFAULT_ENDPOINT_TYPE_AUDIO_SINK);
+
+		for (guint i = 0; i < arr->len; i++) {
+			WpEndpoint *ep = g_ptr_array_index (arr, i);
+			guint32 id = wp_proxy_get_global_id (WP_PROXY (ep));
+			if (id != def_id)
+				continue;
+			def_ep = g_object_ref (ep);
+		}
+	}
+
+	/* find the audio sink endpoint that was the default before */
+	for (guint i = 0; i < self->mixer_controls->len; i++) {
+		struct mixer_control_impl *ctl = (struct mixer_control_impl *)
+				g_ptr_array_index (self->mixer_controls, i);
+		if (ctl->is_master) {
+			master_ctl = ctl;
+			break;
+		}
+	}
+
+	g_debug ("check_and_populate: session:%p, def_ep:%p, def_id:%u, "
+			"master_ctl:%p, master_id:%u", session, def_ep, def_id,
+			master_ctl, master_ctl ? master_ctl->id : 0);
+
+	/* case 1: there is a default endpoint but it doesn't match
+	           what we currently expose -> clear and expose the new one */
+	if (def_ep && (!master_ctl || master_ctl->id != def_id)) {
 		struct mixer_control_impl *mixctl = NULL;
 		gfloat volume;
 		gboolean mute;
 
-		if (id != def_id)
-			continue;
+		/* clear previous */
+		if (master_ctl)
+			g_signal_handlers_disconnect_by_data (master_ctl->endpoint, self);
+		g_ptr_array_set_size (self->mixer_controls, 0);
 
-		wp_endpoint_get_control_float (ep, WP_ENDPOINT_CONTROL_VOLUME, &volume);
-		wp_endpoint_get_control_boolean (ep, WP_ENDPOINT_CONTROL_MUTE, &mute);
+		/* get current master values */
+		wp_endpoint_get_control_float (def_ep, WP_ENDPOINT_CONTROL_VOLUME, &volume);
+		wp_endpoint_get_control_boolean (def_ep, WP_ENDPOINT_CONTROL_MUTE, &mute);
 
+		/* create the Master control */
 		mixctl = g_new0 (struct mixer_control_impl, 1);
 		strncpy (mixctl->pub.name, "Master", sizeof (mixctl->pub.name));
 		mixctl->pub.volume = volume;
 		mixctl->pub.mute = mute;
 		mixctl->is_master = TRUE;
-		mixctl->id = id;
-		mixctl->endpoint = g_object_ref (ep);
+		mixctl->id = def_id;
+		mixctl->endpoint = g_object_ref (def_ep);
 		g_ptr_array_add (self->mixer_controls, mixctl);
 
-		g_signal_connect (ep, "control-changed", (GCallback) control_changed,
+		/* track changes */
+		g_signal_connect (def_ep, "control-changed", (GCallback) control_changed,
 			self);
 
 		/* wake up audiomixer_ensure_controls() */
 		g_cond_broadcast (&self->cond);
-		break;
+
+		g_debug ("controls changed");
+
+		/* notify subscribers */
+		if (self->events && self->events->controls_changed)
+			self->events->controls_changed (self->events_data);
+	}
+	/* case 2: there is no default endpoint but something is exposed -> clear */
+	else if (!def_ep && master_ctl) {
+		g_signal_handlers_disconnect_by_data (master_ctl->endpoint, self);
+		g_ptr_array_set_size (self->mixer_controls, 0);
+
+		g_debug ("controls cleared");
+
+		/* notify subscribers */
+		if (self->events && self->events->controls_changed)
+			self->events->controls_changed (self->events_data);
 	}
 }
 
@@ -133,44 +188,49 @@ static void
 default_endpoint_changed (WpSession * session, WpDefaultEndpointType type,
 		guint32 new_id, struct audiomixer * self)
 {
-	if (session != self->session || type != WP_DEFAULT_ENDPOINT_TYPE_AUDIO_SINK)
+	if (type != WP_DEFAULT_ENDPOINT_TYPE_AUDIO_SINK)
 		return;
 
 	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
-
-	g_ptr_array_set_size (self->mixer_controls, 0);
-	populate_controls (self, session);
-
-	if (self->events && self->events->controls_changed)
-		self->events->controls_changed (self->events_data);
+	check_and_populate_controls (self);
 }
 
 static void
-sessions_changed (WpObjectManager * om, struct audiomixer * self)
+sessions_changed (WpObjectManager * sessions_om, struct audiomixer * self)
 {
 	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
+	g_autoptr (WpSession) old_session = NULL;
 	g_autoptr (WpSession) session = NULL;
 	g_autoptr (GPtrArray) arr = NULL;
 
-	g_ptr_array_set_size (self->mixer_controls, 0);
+	old_session = g_weak_ref_get (&self->session);
 
 	/* normally there is only 1 session */
-	arr = wp_object_manager_get_objects (om, 0);
+	arr = wp_object_manager_get_objects (sessions_om, 0);
 	if (arr->len > 0)
 		session = WP_SESSION (g_object_ref (g_ptr_array_index (arr, 0)));
 
-	if (session)
-		populate_controls (self, session);
+	g_debug ("sessions changed, count:%d, session:%p, old_session:%p",
+			arr->len, session, old_session);
 
-	/* just to be safe in case there are more sessions around */
-	if (session != self->session) {
-		g_signal_connect (session, "default-endpoint-changed",
-			(GCallback) default_endpoint_changed, self);
-		self->session = session;
+	if (session != old_session) {
+		if (old_session)
+			g_signal_handlers_disconnect_by_data (old_session, self);
+		if (session)
+			g_signal_connect (session, "default-endpoint-changed",
+				(GCallback) default_endpoint_changed, self);
+
+		g_weak_ref_set (&self->session, session);
 	}
 
-	if (self->events && self->events->controls_changed)
-		self->events->controls_changed (self->events_data);
+	check_and_populate_controls (self);
+}
+
+static void
+endpoints_changed (WpObjectManager * endpoints_om, struct audiomixer * self)
+{
+	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
+	check_and_populate_controls (self);
 }
 
 static void
@@ -182,10 +242,18 @@ remote_state_changed (WpCore *core, WpRemoteState state,
 	g_cond_broadcast (&self->cond);
 }
 
+static gboolean
+connect_in_idle (struct audiomixer * self)
+{
+	wp_core_connect (self->core);
+	return G_SOURCE_REMOVE;
+}
+
 static void *
 audiomixer_thread (struct audiomixer * self)
 {
-	g_autoptr (WpObjectManager) sessions_om = wp_object_manager_new ();
+	g_autoptr (WpObjectManager) sessions_om =
+			self->sessions_om = wp_object_manager_new ();
 	g_autoptr (WpObjectManager) endpoints_om =
 			self->endpoints_om = wp_object_manager_new ();
 	GVariantBuilder b;
@@ -210,11 +278,13 @@ audiomixer_thread (struct audiomixer * self)
 		g_variant_new_string ("Audio/Sink"));
 	g_variant_builder_close (&b);
 
-	wp_object_manager_add_proxy_interest (self->endpoints_om,
+	wp_object_manager_add_proxy_interest (endpoints_om,
 		PW_TYPE_INTERFACE_Endpoint,
 		g_variant_builder_end (&b),
 		WP_PROXY_FEATURE_INFO | WP_PROXY_ENDPOINT_FEATURE_CONTROLS);
-	wp_core_install_object_manager (self->core, self->endpoints_om);
+	g_signal_connect (endpoints_om, "objects-changed",
+		(GCallback) endpoints_changed, self);
+	wp_core_install_object_manager (self->core, endpoints_om);
 
 	g_signal_connect (self->core, "remote-state-changed",
 		(GCallback) remote_state_changed, self);
@@ -249,6 +319,7 @@ audiomixer_new (void)
 	self->state = WP_REMOTE_STATE_UNCONNECTED;
 	self->mixer_controls = g_ptr_array_new_with_free_func (
 		(GDestroyNotify) mixer_control_impl_free);
+	g_weak_ref_init (&self->session, NULL);
 
 	self->thread = g_thread_new ("audiomixer", (GThreadFunc) audiomixer_thread,
 		self);
@@ -262,6 +333,7 @@ audiomixer_free(struct audiomixer *self)
 	g_main_loop_quit (self->loop);
 	g_thread_join (self->thread);
 
+	g_weak_ref_clear (&self->session);
 	g_ptr_array_unref (self->mixer_controls);
 	g_object_unref (self->core);
 	g_main_loop_unref (self->loop);
@@ -282,13 +354,6 @@ void
 audiomixer_unlock(struct audiomixer *self)
 {
 	g_mutex_unlock (&self->lock);
-}
-
-static gboolean
-connect_in_idle (struct audiomixer * self)
-{
-	wp_core_connect (self->core);
-	return G_SOURCE_REMOVE;
 }
 
 int
