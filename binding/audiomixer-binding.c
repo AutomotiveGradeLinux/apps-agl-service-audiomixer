@@ -149,12 +149,6 @@ list_controls_cb(afb_req_t request)
 
 	audiomixer_lock(audiomixer);
 
-	if (audiomixer_ensure_connected(audiomixer, 3) < 0) {
-		afb_req_fail(request, "failed",
-			"Could not connect to the PipeWire daemon");
-		goto unlock;
-	}
-
 	if (audiomixer_ensure_controls(audiomixer, 3) < 0) {
 		AFB_REQ_NOTICE(request, "No mixer controls were exposed "
 			"in PipeWire after 3 seconds");
@@ -175,7 +169,6 @@ list_controls_cb(afb_req_t request)
 	}
 	afb_req_success(request, ret_json, NULL);
 
-unlock:
 	audiomixer_unlock(audiomixer);
 }
 
@@ -193,12 +186,6 @@ volume_cb(afb_req_t request)
 	if (!control) {
 		afb_req_fail(request, "failed",
 			"Invalid arguments: missing 'control'");
-		goto unlock;
-	}
-
-	if (audiomixer_ensure_connected(audiomixer, 3) < 0) {
-		afb_req_fail(request, "failed",
-			"Could not connect to the PipeWire daemon");
 		goto unlock;
 	}
 
@@ -249,12 +236,6 @@ mute_cb(afb_req_t request)
 	if (!control) {
 		afb_req_fail(request, "failed",
 			"Invalid arguments: missing 'control'");
-		goto unlock;
-	}
-
-	if (audiomixer_ensure_connected(audiomixer, 3) < 0) {
-		afb_req_fail(request, "failed",
-			"Could not connect to the PipeWire daemon");
 		goto unlock;
 	}
 
@@ -375,7 +356,7 @@ onevent(afb_api_t api, const char *event, struct json_object *object)
 
 	audiomixer_lock(audiomixer);
 
-	ctl = audiomixer_find_control(audiomixer, "Master");
+	ctl = audiomixer_find_control(audiomixer, "Master Playback");
 	if (!ctl)
 		goto unlock;
 

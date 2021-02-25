@@ -72,7 +72,7 @@ set (PKG_REQUIRED_LIST
 	libsystemd>=222
 	afb-daemon
 	libpipewire-0.3
-	wireplumber-0.1
+	wireplumber-0.4
 )
 
 # Static constante definition
