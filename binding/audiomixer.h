@@ -35,7 +35,7 @@ void audiomixer_free(struct audiomixer *self);
 void audiomixer_lock(struct audiomixer *self);
 void audiomixer_unlock(struct audiomixer *self);
 
-int audiomixer_ensure_connected(struct audiomixer *self, int timeout_sec);
+int audiomixer_ensure_connected(struct audiomixer *self);
 int audiomixer_ensure_controls(struct audiomixer *self, int timeout_sec);
 
 const struct mixer_control ** audiomixer_get_active_controls(

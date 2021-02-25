@@ -10,6 +10,7 @@
 #include <json-c/json.h>
 #include <afb/afb-binding.h>
 #include <systemd/sd-event.h>
+#include <wp/wp.h>
 #include "audiomixer.h"
 
 static struct audiomixer *audiomixer;
@@ -106,6 +107,8 @@ init(afb_api_t api)
 {
 	int ret;
 
+	wp_init (WP_INIT_ALL);
+
 	ret = afb_daemon_require_api("signal-composer", 1);
 	if (ret) {
 		AFB_WARNING("unable to initialize signal-composer binding");
@@ -149,7 +152,7 @@ list_controls_cb(afb_req_t request)
 
 	audiomixer_lock(audiomixer);
 
-	if (audiomixer_ensure_connected(audiomixer, 3) < 0) {
+	if (audiomixer_ensure_connected(audiomixer) < 0) {
 		afb_req_fail(request, "failed",
 			"Could not connect to the PipeWire daemon");
 		goto unlock;
@@ -196,7 +199,7 @@ volume_cb(afb_req_t request)
 		goto unlock;
 	}
 
-	if (audiomixer_ensure_connected(audiomixer, 3) < 0) {
+	if (audiomixer_ensure_connected(audiomixer) < 0) {
 		afb_req_fail(request, "failed",
 			"Could not connect to the PipeWire daemon");
 		goto unlock;
@@ -252,7 +255,7 @@ mute_cb(afb_req_t request)
 		goto unlock;
 	}
 
-	if (audiomixer_ensure_connected(audiomixer, 3) < 0) {
+	if (audiomixer_ensure_connected(audiomixer) < 0) {
 		afb_req_fail(request, "failed",
 			"Could not connect to the PipeWire daemon");
 		goto unlock;
