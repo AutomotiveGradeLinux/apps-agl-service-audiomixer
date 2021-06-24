@@ -56,8 +56,8 @@ get_mixer_controls (struct audiomixer * self, guint32 node_id, gdouble * vol, gb
 	g_autoptr (GVariant) v = NULL;
 	g_signal_emit_by_name (self->mixer_api, "get-volume", node_id, &v);
 	return v &&
-		g_variant_lookup (v, "volume", "d", &vol, NULL) &&
-		g_variant_lookup (v, "mute", "b", &mute, NULL);
+		g_variant_lookup (v, "volume", "d", vol) &&
+		g_variant_lookup (v, "mute", "b", mute);
 }
 
 static void
