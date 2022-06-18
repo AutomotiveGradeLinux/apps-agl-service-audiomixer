@@ -5,6 +5,13 @@
  * SPDX-License-Identifier: MIT
  */
 
+#ifndef _AUDIOMIXER_H
+#define _AUDIOMIXER_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdbool.h>
 
 struct audiomixer;
@@ -57,3 +64,8 @@ void audiomixer_change_mute(struct audiomixer *self,
 	const struct mixer_control *control,
 	bool mute);
 
+#ifdef __cplusplus
+}
+#endif
+
+#endif // _AUDIOMIXER_H

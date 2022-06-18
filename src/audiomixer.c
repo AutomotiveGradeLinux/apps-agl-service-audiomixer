@@ -433,7 +433,7 @@ do_change_mute (struct action * action)
 	gboolean ret = FALSE;
 
 	g_variant_builder_add (&b, "{sv}", "mute",
-		g_variant_new_double (action->change_mute.mute));
+		g_variant_new_boolean (action->change_mute.mute));
 	g_signal_emit_by_name (self->mixer_api, "set-volume",
 		action->change_mute.id, g_variant_builder_end (&b), &ret);
 	if (!ret)
