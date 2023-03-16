@@ -15,4 +15,7 @@ executable('agl-service-audiomixer',
            src,
            dependencies: [boost_dep, openssl_dep, thread_dep, systemd_dep, wp_dep],
            install: true,
+           c_args : [
+           '-D_XOPEN_SOURCE=700',
+           ],
            install_dir : get_option('sbindir'))
