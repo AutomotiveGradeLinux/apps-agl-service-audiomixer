@@ -1,6 +1,6 @@
 [Unit]
-Requires=kuksa-val.service
-After=kuksa-val.service
+Requires=kuksa-databroker.service wireplumber.service
+After=kuksa-databroker.service wireplumber.service
 
 [Service]
 Type=simple
