@@ -60,3 +60,12 @@ executable('agl-service-audiomixer',
            '-D_XOPEN_SOURCE=700',
            ],
            install_dir : get_option('sbindir'))
+
+executable('audio-mixer-test',
+           ['audiomixertest.c', 'audiomixer.c'],
+           dependencies: [dependency('wireplumber-0.4')],
+           install: true,
+           c_args : [
+           '-D_XOPEN_SOURCE=700',
+           ],
+           install_dir : get_option('bindir'))
