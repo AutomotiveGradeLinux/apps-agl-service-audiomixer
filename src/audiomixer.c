@@ -44,6 +44,11 @@ struct action
 	union {
 		struct {
 			guint32 id;
+			gfloat lvolume;
+			gfloat rvolume;
+		} change_channel_volume;
+		struct {
+			guint32 id;
 			gfloat volume;
 		} change_volume;
 		struct {
@@ -59,13 +64,44 @@ struct action
 };
 
 static gboolean
-get_mixer_controls (struct audiomixer * self, guint32 node_id, gdouble * vol, gboolean * mute)
+get_mixer_controls (struct audiomixer *self, guint32 node_id, gdouble *vol,
+	gdouble *lvol, gdouble *rvol, gboolean *mute)
 {
 	g_autoptr (GVariant) v = NULL;
+	g_autoptr (GVariantIter) iter = NULL;
+	gdouble val;
+	gboolean bval;
+
 	g_signal_emit_by_name (self->mixer_api, "get-volume", node_id, &v);
-	return v &&
-		g_variant_lookup (v, "volume", "d", vol) &&
-		g_variant_lookup (v, "mute", "b", mute);
+	if (!v)
+		return FALSE;
+
+	if (g_variant_lookup (v, "volume", "d", &val))
+		*vol = val;
+	if (g_variant_lookup (v, "mute", "b", &bval))
+		*mute = bval;
+
+	if (g_variant_lookup (v, "channelVolumes", "a{sv}", &iter)) {
+		const gchar *idx_str = NULL;
+
+		while (g_variant_iter_loop (iter, "{&sv}", &idx_str, &v)) {
+			const gchar *channel_str = NULL;
+			if (g_variant_lookup (v, "channel", "&s", &channel_str)) {
+				if (g_variant_lookup (v, "volume", "d", &val)) {
+
+					/* look for stereo channels only */
+					if (g_str_equal (channel_str, "FL"))
+						*lvol = val;
+					else if (g_str_equal (channel_str, "FR"))
+						*rvol = val;
+					else
+						g_warning ("unknown channel %s", channel_str);
+
+				}
+			}
+		}
+	}
+	return TRUE;
 }
 
 static gboolean
@@ -152,11 +188,11 @@ static void
 add_control (struct audiomixer *self, const char *name, guint32 node_id)
 {
 	struct mixer_control_impl *mixctl = NULL;
-	gdouble volume = 1.0;
+	gdouble volume = 1.0, lvol = 1.0, rvol = 1.0;
 	gboolean mute = FALSE;
 
 	/* get current values */
-	if (!get_mixer_controls (self, node_id, &volume, &mute)) {
+	if (!get_mixer_controls (self, node_id, &volume, &lvol, &rvol, &mute)) {
 		g_warning ("failed to get object controls when populating controls for %s",
 			name);
 		return;
@@ -166,18 +202,20 @@ add_control (struct audiomixer *self, const char *name, guint32 node_id)
 	mixctl = g_new0 (struct mixer_control_impl, 1);
 	snprintf (mixctl->pub.name, sizeof (mixctl->pub.name), "%s", name);
 	mixctl->pub.volume = volume;
+	mixctl->pub.lvolume = lvol;
+	mixctl->pub.rvolume = rvol;
 	mixctl->pub.mute = mute;
 	mixctl->node_id = node_id;
 	g_ptr_array_add (self->mixer_controls, mixctl);
 
-	g_debug ("added control %s its volume is %f", mixctl->pub.name, volume);
+	g_debug ("added control %s", mixctl->pub.name);
 }
 
 static void
 volume_changed (struct audiomixer * self, guint32 node_id)
 {
 	g_autoptr (GMutexLocker) locker = g_mutex_locker_new (&self->lock);
-	gdouble vol = 1.0;
+	gdouble vol = 1.0, lvol = 1.0, rvol = 1.0;
 	gboolean mute = FALSE;
 
 	for (guint i = 0; i < self->mixer_controls->len; i++) {
@@ -188,15 +226,29 @@ volume_changed (struct audiomixer * self, guint32 node_id)
 		if (ctl->node_id != node_id)
 			continue;
 
-		if (!get_mixer_controls (self, node_id, &vol, &mute)) {
+		if (!get_mixer_controls (self, node_id, &vol, &lvol, &rvol, &mute)) {
 			g_warning ("failed to get object controls when volume changed");
 			return;
 		}
 
 		if ((ctl->pub.volume - 0.01f) > vol || (ctl->pub.volume + 0.01f) < vol) {
+			/* if volume changed */
 			ctl->pub.volume = vol;
 			change_mask |= MIXER_CONTROL_CHANGE_FLAG_VOLUME;
 		}
+
+		if (!(fabs (ctl->pub.lvolume - lvol) < 0.00001)) {
+			/* if left channel volume changed */
+			ctl->pub.lvolume = lvol;
+			change_mask |= MIXER_CONTROL_CHANGE_FLAG_CHANNEL_VOLUME;
+		}
+
+		if (!(fabs (ctl->pub.rvolume - rvol) < 0.00001)) {
+			/* if right channel volume changed */
+			ctl->pub.rvolume = rvol;
+			change_mask |= MIXER_CONTROL_CHANGE_FLAG_CHANNEL_VOLUME;
+		}
+
 		if (ctl->pub.mute != mute) {
 			ctl->pub.mute = mute;
 			change_mask |= MIXER_CONTROL_CHANGE_FLAG_MUTE;
@@ -317,7 +369,7 @@ on_eq_params_changed (WpPipewireObject *obj, const gchar *param_name,
 				return;
 			}
 
-		if (!(fabs (ctl->pub.gain - gain) < 0.000001)) {
+		if (!(fabs (ctl->pub.gain - gain) < 0.00001)) {
 			/* if gain changed */
 			ctl->pub.gain = gain;
 			change_mask |= MIXER_CONTROL_CHANGE_FLAG_GAIN;
@@ -325,6 +377,8 @@ on_eq_params_changed (WpPipewireObject *obj, const gchar *param_name,
 				self->events->value_changed (self->events_data, change_mask, &ctl->pub);
 			}
 		}
+		else
+			continue;
 
 		break;
 	}
@@ -600,6 +654,71 @@ audiomixer_change_volume(struct audiomixer *self,
 }
 
 static gboolean
+do_change_channel_volume (struct action *action)
+{
+	struct audiomixer *self = action->audiomixer;
+	g_auto (GVariantBuilder) b =
+		G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE_VARDICT);
+	g_auto (GVariantBuilder) l_vol =
+		G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE_VARDICT);
+	g_auto (GVariantBuilder) r_vol =
+		G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE_VARDICT);
+	g_auto (GVariantBuilder) channel_vols =
+		G_VARIANT_BUILDER_INIT (G_VARIANT_TYPE_VARDICT);
+
+	gboolean ret = FALSE;
+
+	/* left channel */
+	g_variant_builder_add (&l_vol, "{sv}",
+		"volume", g_variant_new_double (action->change_channel_volume.lvolume));
+	g_variant_builder_add (&l_vol, "{sv}",
+		"channel", g_variant_new_string ("FL"));
+
+	g_variant_builder_add (&channel_vols, "{sv}", "0",
+		g_variant_builder_end (&l_vol));
+
+	/* right channel */
+	g_variant_builder_add (&r_vol, "{sv}",
+		"volume", g_variant_new_double (action->change_channel_volume.rvolume));
+	g_variant_builder_add (&r_vol, "{sv}",
+		"channel", g_variant_new_string ("FR"));
+
+	g_variant_builder_add (&channel_vols, "{sv}", "1",
+		g_variant_builder_end (&r_vol));
+
+	g_variant_builder_add (&b, "{sv}",
+		"channelVolumes", g_variant_builder_end (&channel_vols));
+
+	g_signal_emit_by_name (self->mixer_api, "set-volume",
+		action->change_volume.id, g_variant_builder_end (&b), &ret);
+	if (!ret)
+		g_warning ("mixer api set-volume(channel vols) failed");
+
+	return G_SOURCE_REMOVE;
+}
+
+void
+audiomixer_change_channel_volume(struct audiomixer *self,
+	const struct mixer_control *control,
+	double left_channel_volume, double right_channel_volume)
+{
+	const struct mixer_control_impl *impl =
+		(const struct mixer_control_impl *) control;
+	struct action * action;
+
+	g_return_if_fail (self->initialized == 1);
+
+	/* schedule the action to run on the audiomixer thread */
+	action = g_new0 (struct action, 1);
+	action->audiomixer = self;
+	action->change_volume.id = impl->node_id;
+	action->change_channel_volume.lvolume = (gfloat)left_channel_volume;
+	action->change_channel_volume.rvolume = (gfloat)right_channel_volume;
+	wp_core_idle_add (self->core, NULL, (GSourceFunc)do_change_channel_volume,
+		action, g_free);
+}
+
+static gboolean
 do_change_mute (struct action * action)
 {
 	struct audiomixer *self = action->audiomixer;
@@ -666,7 +785,7 @@ audiomixer_change_gain(struct audiomixer *self,
 	const struct mixer_control *control,
 	float gain)
 {
-	const struct mixer_control_impl *impl = control;
+	const struct mixer_control_impl *impl = (struct mixer_control_impl *)control;
 	struct action * action;
 
 	g_return_if_fail (self->initialized == 1);
@@ -676,7 +795,7 @@ audiomixer_change_gain(struct audiomixer *self,
 	action->audiomixer = self;
 	action->change_gain.id = impl->node_id;
 	action->change_gain.gain = gain;
-	action->change_gain.control = impl->pub.name;
+	action->change_gain.control = (gchar *)impl->pub.name;
 	wp_core_idle_add (self->core, NULL, (GSourceFunc) do_change_gain, action,
 		g_free);
 }

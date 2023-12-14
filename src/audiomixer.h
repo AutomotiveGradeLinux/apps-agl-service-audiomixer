@@ -20,6 +20,8 @@ struct mixer_control
 {
 	char name[32];
 	double volume;
+	double lvolume; /* left channel volume */
+	double rvolume; /* right channel volume */
 	float gain;
 	bool mute;
 };
@@ -30,6 +32,7 @@ struct audiomixer_events
 
 	void (*value_changed) (void *data,
 #define MIXER_CONTROL_CHANGE_FLAG_VOLUME (1<<0)
+#define MIXER_CONTROL_CHANGE_FLAG_CHANNEL_VOLUME (1<<0)
 #define MIXER_CONTROL_CHANGE_FLAG_MUTE   (1<<1)
 #define MIXER_CONTROL_CHANGE_FLAG_GAIN (1<<2)
 				unsigned int change_mask,
@@ -61,6 +64,10 @@ void audiomixer_add_event_listener(struct audiomixer *self,
 void audiomixer_change_volume(struct audiomixer *self,
 	const struct mixer_control *control,
 	double volume);
+
+void audiomixer_change_channel_volume (struct audiomixer *self,
+	const struct mixer_control *control,
+	double left_channel_volume, double right_channel_volume);
 
 void audiomixer_change_gain(struct audiomixer *self,
 	const struct mixer_control *control,
