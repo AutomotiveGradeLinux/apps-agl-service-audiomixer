@@ -26,15 +26,16 @@ struct mixer_control
 	bool mute;
 };
 
+#define MIXER_CONTROL_CHANGE_FLAG_VOLUME		(1<<0)
+#define MIXER_CONTROL_CHANGE_FLAG_CHANNEL_VOLUME	(1<<1)
+#define MIXER_CONTROL_CHANGE_FLAG_MUTE			(1<<2)
+#define MIXER_CONTROL_CHANGE_FLAG_GAIN			(1<<3)
+
 struct audiomixer_events
 {
 	void (*controls_changed) (void *data);
 
 	void (*value_changed) (void *data,
-#define MIXER_CONTROL_CHANGE_FLAG_VOLUME (1<<0)
-#define MIXER_CONTROL_CHANGE_FLAG_CHANNEL_VOLUME (1<<0)
-#define MIXER_CONTROL_CHANGE_FLAG_MUTE   (1<<1)
-#define MIXER_CONTROL_CHANGE_FLAG_GAIN (1<<2)
 				unsigned int change_mask,
 				const struct mixer_control *control);
 };

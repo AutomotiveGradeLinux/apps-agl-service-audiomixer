@@ -56,6 +56,13 @@ private:
 	struct audiomixer *m_audiomixer;
 	struct audiomixer_events m_audiomixer_events;
 
+	double m_volume = 0.5;
+	double m_volume_faded = 0.5;
+	int m_balance = 0;
+	int m_fade = 0;
+	double m_nav_volume = 0.5;
+	bool m_nav_mute = false;
+
 	void HandleSignalChange(const std::string &path, const Datapoint &dp);
 
 	void HandleSignalSetError(const std::string &path, const Error &error);
@@ -67,6 +74,14 @@ private:
 	void HandleMixerControlChange(void);
 
 	void HandleMixerValueChange(unsigned int change_mask, const struct mixer_control *control);
+
+	void SetMainVolume(void);
+
+	void SetMixerVolume(const std::string &path, const std::string &mixer, const double volume);
+
+	void SetMixerMute(const std::string path, const std::string mixer, const bool mute);
+
+	void SetEqualizerGain(const std::string path, const std::string mixer, const double gain);
 };
 
 #endif // _AUDIOMIXER_SERVICE_H
