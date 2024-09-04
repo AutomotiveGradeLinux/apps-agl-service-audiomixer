@@ -1,16 +1,17 @@
 boost_dep = dependency('boost',
                        version : '>=1.72',
                        modules : [ 'thread', 'filesystem', 'program_options', 'log', 'system' ])
+wireplumber_dep = dependency('wireplumber-0.5')
 
 cpp = meson.get_compiler('cpp')
 grpcpp_reflection_dep = cpp.find_library('grpc++_reflection')
 
 service_dep = [
     boost_dep,
+    wireplumber_dep,
     dependency('openssl'),
     dependency('threads'),
     dependency('libsystemd'),
-    dependency('wireplumber-0.4'),
     dependency('protobuf'),
     dependency('grpc'),
     dependency('grpc++'),
@@ -63,7 +64,7 @@ executable('agl-service-audiomixer',
 
 executable('audio-mixer-test',
            ['audiomixertest.c', 'audiomixer.c'],
-           dependencies: [dependency('wireplumber-0.4')],
+           dependencies: wireplumber_dep,
            install: true,
            c_args : [
            '-D_XOPEN_SOURCE=700',

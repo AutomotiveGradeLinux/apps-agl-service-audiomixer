@@ -21,6 +21,8 @@ struct audiomixer
 
 	GPtrArray *mixer_controls;
 
+#define INITIALIZED_THREAD 1
+#define INITIALIZED_CONTROLS 5
 	gint initialized;
 	WpObjectManager *om;
 	WpObjectManager *eq_om;
@@ -72,6 +74,8 @@ get_mixer_controls (struct audiomixer *self, guint32 node_id, gdouble *vol,
 	gdouble val;
 	gboolean bval;
 
+	g_return_val_if_fail (self->mixer_api, FALSE);
+
 	g_signal_emit_by_name (self->mixer_api, "get-volume", node_id, &v);
 	if (!v)
 		return FALSE;
@@ -111,6 +115,8 @@ get_gain (struct audiomixer *self, const char *name, gfloat *gain)
 	g_auto (GValue) val = G_VALUE_INIT;
 	gchar param_name[20];
 	gboolean ret = FALSE;
+
+	g_return_val_if_fail (self->eq_node, FALSE);
 
 	snprintf (param_name, sizeof (param_name), "%s:%s", name, "Gain");
 
@@ -270,6 +276,8 @@ rescan_controls (struct audiomixer * self)
 
 	g_debug ("rescan");
 
+	g_return_if_fail (self->default_nodes_api);
+
 	/* clear previous */
 	g_ptr_array_set_size (self->mixer_controls, 0);
 
@@ -284,13 +292,12 @@ rescan_controls (struct audiomixer * self)
 	if (id != (guint32)-1)
 		add_control (self, "Master Capture", id);
 
-	/* add endpoints */
+	/* add role-based policy targets */
 	it = wp_object_manager_new_iterator (self->om);
 	for (; wp_iterator_next (it, &val); g_value_unset (&val)) {
 		WpPipewireObject *ep = g_value_get_object (&val);
-		const gchar *name = wp_pipewire_object_get_property (ep, "endpoint.description");
-		const gchar *node = wp_pipewire_object_get_property (ep, "node.id");
-		id = node ? atoi(node) : 0;
+		const gchar *name = wp_pipewire_object_get_property (ep, "node.description");
+		id = wp_proxy_get_bound_id (WP_PROXY (ep));
 		if (name && id != 0 && id != (guint32)-1)
 			add_control (self, name, id);
 	}
@@ -307,42 +314,6 @@ rescan_controls (struct audiomixer * self)
 	if (self->events && self->events->controls_changed)
 		self->events->controls_changed (self->events_data);
 	g_cond_broadcast (&self->cond);
-}
-
-static void
-on_default_nodes_activated (WpObject * p, GAsyncResult * res, struct audiomixer * self)
-{
-	g_autoptr (GError) error = NULL;
-	if (!wp_object_activate_finish (p, res, &error)) {
-		g_warning ("%s", error->message);
-	}
-
-	if (wp_object_get_active_features (WP_OBJECT (self->mixer_api))
-		& WP_PLUGIN_FEATURE_ENABLED) {
-			wp_core_install_object_manager (self->core, self->eq_om);
-			wp_core_install_object_manager (self->core, self->om);
-	}
-
-	g_signal_connect_swapped (self->default_nodes_api, "changed",
-		(GCallback) rescan_controls, self);
-}
-
-static void
-on_mixer_activated (WpObject * p, GAsyncResult * res, struct audiomixer * self)
-{
-	g_autoptr (GError) error = NULL;
-	if (!wp_object_activate_finish (p, res, &error)) {
-		g_warning ("%s", error->message);
-	}
-
-	if (wp_object_get_active_features (WP_OBJECT (self->default_nodes_api))
-		& WP_PLUGIN_FEATURE_ENABLED) {
-			wp_core_install_object_manager (self->core, self->om);
-			wp_core_install_object_manager (self->core, self->eq_om);
-	}
-
-	g_signal_connect_swapped (self->mixer_api, "changed",
-		(GCallback) volume_changed, self);
 }
 
 static void
@@ -383,6 +354,7 @@ on_eq_params_changed (WpPipewireObject *obj, const gchar *param_name,
 		break;
 	}
 }
+
 static void
 on_eq_added (WpObjectManager *om, WpPipewireObject *node,
 	struct audiomixer *self)
@@ -390,7 +362,6 @@ on_eq_added (WpObjectManager *om, WpPipewireObject *node,
 	self->eq_node = node;
 	g_signal_connect (node, "params-changed", G_CALLBACK (on_eq_params_changed),
 		self);
-	rescan_controls (self);
 }
 
 static void
@@ -398,21 +369,52 @@ on_eq_removed (WpObjectManager *om, WpPipewireObject *node, struct audiomixer
 	*self)
 {
 	self->eq_node = NULL;
-	rescan_controls (self);
+}
+
+static void
+finish_loading (struct audiomixer * self)
+{
+	if (++self->initialized == INITIALIZED_CONTROLS) {
+		self->default_nodes_api = wp_plugin_find (self->core, "default-nodes-api");
+		self->mixer_api = wp_plugin_find (self->core, "mixer-api");
+		g_object_set (G_OBJECT (self->mixer_api), "scale", 1 /* cubic */, NULL);
+
+		g_signal_connect_swapped (self->om, "objects-changed",
+			(GCallback) rescan_controls, self);
+		g_signal_connect_swapped (self->eq_om, "objects-changed",
+			(GCallback) rescan_controls, self);
+		g_signal_connect_swapped (self->default_nodes_api, "changed",
+			(GCallback) rescan_controls, self);
+		g_signal_connect_swapped (self->mixer_api, "changed",
+			(GCallback) volume_changed, self);
+		rescan_controls (self);
+	}
+}
+
+static void
+on_component_loaded (WpCore * core, GAsyncResult * res, struct audiomixer * self)
+{
+	g_autoptr (GError) error = NULL;
+	if (!wp_core_load_component_finish (core, res, &error)) {
+		g_critical ("%s", error->message);
+		return;
+	}
+	finish_loading (self);
 }
 
 static void
 on_core_connected (struct audiomixer *self)
 {
-
 	self->om = wp_object_manager_new ();
-	wp_object_manager_add_interest (self->om, WP_TYPE_ENDPOINT,
-		WP_CONSTRAINT_TYPE_PW_GLOBAL_PROPERTY,
-		PW_KEY_MEDIA_CLASS, "#s", "Audio/*", NULL);
+	wp_object_manager_add_interest (self->om, WP_TYPE_NODE,
+		WP_CONSTRAINT_TYPE_PW_PROPERTY,
+		"policy.role-based.target", "=s", "true", NULL);
 	wp_object_manager_request_object_features (self->om,
-		WP_TYPE_ENDPOINT, WP_OBJECT_FEATURES_ALL);
-	g_signal_connect_swapped (self->om, "objects-changed",
-		(GCallback) rescan_controls, self);
+		WP_TYPE_NODE, WP_OBJECT_FEATURES_ALL);
+	g_signal_connect_swapped (self->om, "installed", G_CALLBACK (finish_loading),
+		self);
+
+	wp_core_install_object_manager (self->core, self->om);
 
 	self->eq_node = NULL;
 	self->eq_om = wp_object_manager_new ();
@@ -426,18 +428,21 @@ on_core_connected (struct audiomixer *self)
 		NULL);
 	wp_object_manager_request_object_features (self->eq_om,
 		WP_TYPE_NODE, WP_OBJECT_FEATURES_ALL);
+	g_signal_connect_swapped (self->eq_om, "installed", G_CALLBACK (finish_loading),
+		self);
 	g_signal_connect (self->eq_om, "object-added", G_CALLBACK (on_eq_added),
 		self);
 	g_signal_connect (self->eq_om, "object-removed", G_CALLBACK (on_eq_removed),
 		self);
+	wp_core_install_object_manager (self->core, self->eq_om);
 
-	wp_object_activate (WP_OBJECT (self->default_nodes_api),
-		WP_PLUGIN_FEATURE_ENABLED, NULL,
-		(GAsyncReadyCallback) on_default_nodes_activated, self);
-
-	wp_object_activate (WP_OBJECT (self->mixer_api),
-		WP_PLUGIN_FEATURE_ENABLED, NULL,
-		(GAsyncReadyCallback) on_mixer_activated, self);
+	/* load required API modules */
+	wp_core_load_component (self->core,
+			"libwireplumber-module-default-nodes-api", "module",
+			NULL, NULL, NULL, (GAsyncReadyCallback) on_component_loaded, self);
+	wp_core_load_component (self->core,
+			"libwireplumber-module-mixer-api", "module",
+			NULL, NULL, NULL, (GAsyncReadyCallback) on_component_loaded, self);
 }
 
 static void
@@ -446,10 +451,20 @@ on_core_disconnected (struct audiomixer * self)
 	g_ptr_array_set_size (self->mixer_controls, 0);
 	g_clear_object (&self->om);
 	g_clear_object (&self->eq_om);
-	g_signal_handlers_disconnect_by_data (self->default_nodes_api, self);
-	g_signal_handlers_disconnect_by_data (self->mixer_api, self);
-	wp_object_deactivate (WP_OBJECT (self->default_nodes_api), WP_PLUGIN_FEATURE_ENABLED);
-	wp_object_deactivate (WP_OBJECT (self->mixer_api), WP_PLUGIN_FEATURE_ENABLED);
+	if (self->default_nodes_api) {
+		g_signal_handlers_disconnect_by_data (self->default_nodes_api, self);
+		wp_object_deactivate (WP_OBJECT (self->default_nodes_api), WP_PLUGIN_FEATURE_ENABLED);
+		wp_core_remove_object (self->core, self->default_nodes_api);
+		g_clear_object (&self->default_nodes_api);
+	}
+	if (self->mixer_api) {
+		g_signal_handlers_disconnect_by_data (self->mixer_api, self);
+		wp_object_deactivate (WP_OBJECT (self->mixer_api), WP_PLUGIN_FEATURE_ENABLED);
+		wp_core_remove_object (self->core, self->mixer_api);
+		g_clear_object (&self->mixer_api);
+	}
+	/* at this point we are back at the INITIALIZED_THREAD state */
+	self->initialized = INITIALIZED_THREAD;
 }
 
 static void
@@ -462,34 +477,15 @@ audiomixer_init_in_thread (struct audiomixer * self)
 	g_main_context_push_thread_default (self->context);
 
 	self->loop = g_main_loop_new (self->context, FALSE);
-	self->core = wp_core_new (self->context, NULL);
-
-	/* load required API modules */
-	if (!wp_core_load_component (self->core,
-			"libwireplumber-module-default-nodes-api", "module", NULL, &error)) {
-		g_warning ("%s", error->message);
-		self->initialized = -1;
-		goto out;
-	}
-	if (!wp_core_load_component (self->core,
-			"libwireplumber-module-mixer-api", "module", NULL, &error)) {
-		g_warning ("%s", error->message);
-		self->initialized = -1;
-		goto out;
-	}
-
-	self->default_nodes_api = wp_plugin_find (self->core, "default-nodes-api");
-	self->mixer_api = wp_plugin_find (self->core, "mixer-api");
-	g_object_set (G_OBJECT (self->mixer_api), "scale", 1 /* cubic */, NULL);
+	self->core = wp_core_new (self->context, NULL, NULL);
 
 	g_signal_connect_swapped (self->core, "connected",
 		G_CALLBACK (on_core_connected), self);
 	g_signal_connect_swapped (self->core, "disconnected",
 		G_CALLBACK (on_core_disconnected), self);
 
-	self->initialized = 1;
+	self->initialized = INITIALIZED_THREAD;
 
-out:
 	g_cond_broadcast (&self->cond);
 }
 
@@ -502,8 +498,6 @@ audiomixer_thread (struct audiomixer * self)
 	g_main_loop_run (self->loop);
 
 	wp_core_disconnect (self->core);
-	g_clear_object (&self->default_nodes_api);
-	g_clear_object (&self->mixer_api);
 	g_object_unref (self->core);
 
 	g_main_context_pop_thread_default (self->context);
@@ -528,7 +522,7 @@ audiomixer_new (void)
 	self->initialized = 0;
 	self->thread = g_thread_new ("audiomixer", (GThreadFunc) audiomixer_thread,
 		self);
-	while (self->initialized == 0)
+	while (self->initialized < INITIALIZED_THREAD)
 		g_cond_wait (&self->cond, &self->lock);
 	g_mutex_unlock (&self->lock);
 
@@ -573,12 +567,12 @@ audiomixer_ensure_controls(struct audiomixer *self, int timeout_sec)
 {
 	gint64 end_time = g_get_monotonic_time () + timeout_sec * G_TIME_SPAN_SECOND;
 
-	g_return_val_if_fail (self->initialized == 1, -EIO);
+	g_return_val_if_fail (self->initialized >= INITIALIZED_THREAD, -EIO);
 
 	if (!wp_core_is_connected (self->core))
 		g_main_context_invoke (self->context, (GSourceFunc) do_connect, self->core);
 
-	while (self->mixer_controls->len == 0) {
+	while (self->initialized < INITIALIZED_CONTROLS) {
 		if (!g_cond_wait_until (&self->cond, &self->lock, end_time))
 			return -ETIMEDOUT;
 	}
@@ -642,7 +636,7 @@ audiomixer_change_volume(struct audiomixer *self,
 		(const struct mixer_control_impl *) control;
 	struct action * action;
 
-	g_return_if_fail (self->initialized == 1);
+	g_return_if_fail (self->initialized == INITIALIZED_CONTROLS);
 
 	/* schedule the action to run on the audiomixer thread */
 	action = g_new0 (struct action, 1);
@@ -706,7 +700,7 @@ audiomixer_change_channel_volume(struct audiomixer *self,
 		(const struct mixer_control_impl *) control;
 	struct action * action;
 
-	g_return_if_fail (self->initialized == 1);
+	g_return_if_fail (self->initialized == INITIALIZED_CONTROLS);
 
 	/* schedule the action to run on the audiomixer thread */
 	action = g_new0 (struct action, 1);
@@ -744,7 +738,7 @@ audiomixer_change_mute(struct audiomixer *self,
 		(const struct mixer_control_impl *) control;
 	struct action * action;
 
-	g_return_if_fail (self->initialized == 1);
+	g_return_if_fail (self->initialized == INITIALIZED_CONTROLS);
 
 	/* schedule the action to run on the audiomixer thread */
 	action = g_new0 (struct action, 1);
@@ -788,7 +782,7 @@ audiomixer_change_gain(struct audiomixer *self,
 	const struct mixer_control_impl *impl = (struct mixer_control_impl *)control;
 	struct action * action;
 
-	g_return_if_fail (self->initialized == 1);
+	g_return_if_fail (self->initialized == INITIALIZED_CONTROLS);
 
 	/* schedule the action to run on the audiomixer thread */
 	action = g_new0 (struct action, 1);
