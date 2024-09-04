@@ -42,7 +42,7 @@ set_mute (AudioMixerTest *self, gint id)
 		if (id == i) {
 
 			if (g_str_equal ("bass", ctrl->name) || g_str_equal ("treble", ctrl->name))
-				g_warning ("mute cannot be applied for %s control", ctrl->name);
+				fprintf (stderr, "mute cannot be applied for %s control\n", ctrl->name);
 			else {
 				/* toggle mute value */
 				mute = (ctrl->mute) ? FALSE : TRUE;
@@ -70,14 +70,14 @@ set_gain (AudioMixerTest *self, gint id, gfloat gain)
 
 			if (g_str_equal ("bass", ctrl->name) || g_str_equal ("treble", ctrl->name)) {
 				if (fabs (ctrl->gain - gain) < 0.00001)
-					g_warning ("gain already at requested level %f", ctrl->gain);
+					fprintf (stderr, "gain already at requested level %f\n", ctrl->gain);
 				else {
 					audiomixer_change_gain (self->am, ctrl, gain);
 					ret = TRUE;
 				}
 			}
 			else
-				g_warning ("gain cannot be applied for %s control", ctrl->name);
+				fprintf (stderr, "gain cannot be applied for %s control\n", ctrl->name);
 
 			break;
 		}
@@ -97,11 +97,11 @@ set_volume (AudioMixerTest *self, gint id, double vol)
 
 		if (id == i) {
 			if (g_str_equal ("bass", ctrl->name) || g_str_equal ("treble", ctrl->name))
-				g_warning ("volume cannot be applied for %s control", ctrl->name);
+				fprintf (stderr, "volume cannot be applied for %s control\n", ctrl->name);
 			else {
 
 				if (fabs (ctrl->volume - vol) < 0.00001)
-					g_warning ("volume is already at requested level %f", ctrl->volume);
+					fprintf (stderr, "volume is already at requested level %f\n", ctrl->volume);
 				else {
 					audiomixer_change_volume (self->am, ctrl, vol);
 					ret = TRUE;
@@ -129,20 +129,20 @@ set_channels_volume (AudioMixerTest *self, gint id, double lvol, double rvol)
 
 		if (id == i) {
 			if (g_str_equal ("bass", ctrl->name) || g_str_equal ("treble", ctrl->name))
-				g_warning ("volume cannot be applied for %s control", ctrl->name);
+				fprintf (stderr, "volume cannot be applied for %s control\n", ctrl->name);
 			else {
 
 				if (fabs (ctrl->lvolume - lvol) < 0.00001) {
 					set_left_channel_volume = FALSE;
 					lvol = ctrl->lvolume;
-					g_warning ("left volume is already at requested level %f",
+					fprintf (stderr, "left volume is already at requested level %f\n",
 						ctrl->lvolume);
 				}
 
 				if (fabs (ctrl->rvolume - rvol) < 0.00001) {
 					set_right_channel_volume = FALSE;
 					rvol = ctrl->rvolume;
-					g_warning ("right volume is already at requested level %f",
+					fprintf (stderr, "right volume is already at requested level %f\n",
 						ctrl->rvolume);
 				}
 
@@ -223,28 +223,40 @@ static void show_help (void)
 		"                       audio-mixer-test -i 9 -m                  -> mutes 9th control (Multimedia) with 0.8\n");
 }
 
+static const struct option long_options[] = {
+	{ "help",						no_argument,				NULL, 'h' },
+	{ "print-controls",	no_argument,				NULL, 'p' },
+	{ "id",							required_argument,	NULL, 'i' },
+	{ "left-chan-vol",	required_argument,	NULL, 'l' },
+	{ "right-chan-vol",	required_argument,	NULL, 'r' },
+	{ "set-volume",			required_argument,	NULL, 'v' },
+	{ "set-mute",				no_argument,				NULL, 'm' },
+	{ "set-gain",				required_argument,	NULL, 'g' },
+	{ NULL,	0, NULL, 0}
+};
+
 static void
 mixer_value_change_cb (void *data,
 	unsigned int change_mask,
 	const struct mixer_control *ctrl)
 {
 	AudioMixerTest *self = (AudioMixerTest *)data;
-	refresh_ctrls (self);
 	g_main_loop_quit (self->loop);
 }
 
 static void
-mixer_controls_changed (void *data)
+wait_for_change (AudioMixerTest *self)
 {
-	AudioMixerTest *self = (AudioMixerTest *)data;
-	g_main_loop_quit (self->loop);
+	audiomixer_unlock (self->am);
+	g_main_loop_run (self->loop);
+	audiomixer_lock (self->am);
+	refresh_ctrls (self);
 }
 
 gint
 main (gint argc, gchar **argv)
 {
 	AudioMixerTest self = { 0 };
-	g_autoptr (GError) error = NULL;
 	gint c, ret = 0;
 	struct audiomixer_events audiomixer_events = { 0 };
 
@@ -254,70 +266,46 @@ main (gint argc, gchar **argv)
 	gboolean set_right_channel_volume = FALSE;
 	gboolean set_left_channel_volume = FALSE;
 
-	self.loop = g_main_loop_new (NULL, FALSE);
-
-	self.am = audiomixer_new ();
-
-	if (!self.am) {
-		g_warning ("unable to open audiomixer");
-		goto exit;
-	}
-
-	audiomixer_lock (self.am);
-	ret = audiomixer_ensure_controls (self.am, 3);
-	audiomixer_unlock (self.am);
-	if (ret < 0) {
-		g_warning ("ensure controls failed");
-		goto exit;
-	}
-
-	audiomixer_events.controls_changed = mixer_controls_changed;
-	audiomixer_add_event_listener (self.am, &audiomixer_events, (void *)&self);
-
-	g_debug ("waiting for controls to be available");
-
-	do {
-		self.ctrls = audiomixer_get_active_controls (self.am, &self.nctrls);
-
-		/*
-		 * not a clean check but it appears like this is the best we can do at the
-		 * moment.
-		 */
-		if (self.nctrls <= 4)
-			/* end points are not registered, wait for them to show up */
-			g_main_loop_run (self.loop);
-		else
-			break;
-
-	} while (1);
-
 	if (argc == 1) {
-		print_ctrls (&self);
+		fprintf (stderr, "no options given\n");
 		show_help ();
 		return 0;
 	}
-
-	audiomixer_events.value_changed = mixer_value_change_cb;
-	audiomixer_add_event_listener (self.am, &audiomixer_events, (void *)&self);
-
-	static const struct option long_options[] = {
-		{ "help",						no_argument,				NULL, 'h' },
-		{ "print-controls",	no_argument,				NULL, 'p' },
-		{ "id",							required_argument,	NULL, 'i' },
-		{ "left-chan-vol",	required_argument,	NULL, 'l' },
-		{ "right-chan-vol",	required_argument,	NULL, 'r' },
-		{ "set-volume",			required_argument,	NULL, 'v' },
-		{ "set-mute",				no_argument,				NULL, 'm' },
-		{ "set-gain",				required_argument,	NULL, 'g' },
-		{ NULL,	0, NULL, 0}
-	};
 
 	while ((c = getopt_long (argc, argv, "hpi:v:mg:l:r:", long_options, NULL)) != -1) {
 		switch(c) {
 		case 'h':
 			show_help ();
+			return 0;
+		default:
 			break;
+		}
+	}
 
+	self.loop = g_main_loop_new (NULL, FALSE);
+
+	self.am = audiomixer_new ();
+	if (!self.am) {
+		fprintf (stderr, "unable to open audiomixer\n");
+		goto exit;
+	}
+
+	audiomixer_lock (self.am);
+
+	ret = audiomixer_ensure_controls (self.am, 3);
+	if (ret < 0) {
+		fprintf (stderr, "ensure controls failed\n");
+		goto exit;
+	}
+
+	self.ctrls = audiomixer_get_active_controls (self.am, &self.nctrls);
+
+	audiomixer_events.value_changed = mixer_value_change_cb;
+	audiomixer_add_event_listener (self.am, &audiomixer_events, (void *)&self);
+
+	optind = 1;	/* reset option scanning */
+	while ((c = getopt_long (argc, argv, "hpi:v:mg:l:r:", long_options, NULL)) != -1) {
+		switch(c) {
 		case 'p':
 			print_ctrls (&self);
 			break;
@@ -326,29 +314,29 @@ main (gint argc, gchar **argv)
 			id = atoi (optarg);
 			if (!(id >= 0 && id < self.nctrls)) {
 				ret = -1;
-				g_warning ("id(%d) is invalid", id);
+				fprintf (stderr, "id(%d) is invalid\n", id);
 			}
 			break;
 
 		case 'v':
 			vol = (double)atof (optarg);
 			if (id == -1) {
-				g_warning ("control id not given defaulting it to 0(Master Playback)");
+				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
 				id = 0;
 			}
 
 			ret = set_volume (&self, id, vol);
 			if (ret != TRUE)
-				g_warning ("set-volume failed");
+				fprintf (stderr, "set-volume failed");
 			else
 				/* wait for volume to be acked */
-				g_main_loop_run (self.loop);
+				wait_for_change (&self);
 
 			break;
 
 		case 'l':
 			if (id == -1) {
-				g_warning ("control id not given defaulting it to 0(Master Playback)");
+				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
 				id = 0;
 			}
 
@@ -358,7 +346,7 @@ main (gint argc, gchar **argv)
 
 		case 'r':
 			if (id == -1) {
-				g_warning ("control id not given defaulting it to 0(Master Playback)");
+				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
 				id = 0;
 			}
 
@@ -368,32 +356,32 @@ main (gint argc, gchar **argv)
 
 		case 'm':
 			if (id == -1) {
-				g_warning ("control id not given defaulting it to 0(Master Playback)");
+				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
 				id = 0;
 			}
 
 			ret = set_mute (&self, id);
 			if (ret != TRUE)
-				g_warning ("set-mute failed");
+				fprintf (stderr, "set-mute failed\n");
 			else
 				/* wait for mute to be acked */
-				g_main_loop_run (self.loop);
+				wait_for_change (&self);
 
 			break;
 
 		case 'g':
 			gain = atof (optarg);
 			if (id == -1) {
-				g_warning ("control id not given defaulting it to 11(bass)");
+				fprintf (stderr, "control id not given defaulting it to 11(bass)\n");
 				id = 11; /* bass ctrl */
 			}
 
 			ret = set_gain (&self, id, gain);
 			if (ret != TRUE)
-				g_warning ("set-gain failed");
+				fprintf (stderr, "set-gain failed\n");
 			else
 				/* wait for gain to be acked */
-				g_main_loop_run (self.loop);
+				wait_for_change (&self);
 
 			break;
 
@@ -406,17 +394,18 @@ main (gint argc, gchar **argv)
 	if (set_left_channel_volume && set_right_channel_volume) {
 		ret = set_channels_volume (&self, id, lvol, rvol);
 		if (ret != TRUE)
-			g_warning ("set_channels_volume failed");
+			fprintf (stderr, "set_channels_volume failed\n");
 		else
 			/* wait for volume to be acked */
-			g_main_loop_run (self.loop);
+			wait_for_change (&self);
 	}
 	else if (set_left_channel_volume || set_right_channel_volume) {
-		g_warning ("set volume of both left and right channels");
+		fprintf (stderr, "set volume of both left and right channels\n");
 	}
 
 exit:
 	/* clean up at program exit */
+	audiomixer_unlock (self.am);
 	audio_mixer_clear (&self);
 	return ret;
 }
