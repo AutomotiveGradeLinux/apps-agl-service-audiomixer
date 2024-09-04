@@ -193,34 +193,30 @@ static void show_help (void)
 		"\n"
 		"  -h, --help           Show this help\n"
 		"  -p, --print-controls prints controls\n"
-		"  -i, --id             control id(serial#) of the control, take a look at the controls to get the id of control\n"
-		"                       Examples:\n"
-		"                       audio-mixer-test -> prints the controls and help text\n"
-		"                       audio-mixer-test -p -> prints only the controls\n"
-		"  -v, --set-volume     set volume level for a volume control(all controls except bass and treble) this option sets\n"
-		"                       volume for all the channels, for setting channel specific volumes check -l or -r options\n"
-		"                       Examples:\n"
-		"                       audio-mixer-test -v 0.2                   -> sets volume(for all channels) of the 1st control(default id)\n"
-		"                                                                    with 0.2\n"
-		"                       audio-mixer-test -i 9 -v 0.2              -> sets volume of the 9th control with 0.2\n"
-		"  -l, --left-chan-vol  set left channel volume for a volume control(all controls except bass and treble)\n"
-		"  -r, --right-chan-vol set right channel volume for a volume control(all controls except bass and treble)\n"
-		"                       only stereo channels are supported for now, and vol update on both the channels is required\n"
-		"                       Examples:\n"
-		"                       audio-mixer-test -l 0.2                   -> gives an error as only one channel is updated\n"
-		"                       audio-mixer-test -l 0.1 -r 0.2            -> sets left channel volume of 0.1 and right channel volume of\n"
-		"                                                                    0.2 on the 1st control (default id) with 0.2\n"
-		"                       audio-mixer-test -i 9 -l 0.1 -r 0.2       -> sets left channel volume of 0.1 and right channel volume\n"
-		"                                                                    of 0.2 on the 9th control with 0.2\n"
-		"  -g, --set-gain       set gain level for gain controls like bass and treble\n"
-		"                       Examples:\n"
-		"                       audio-mixer-test -i 12 -g 0.8             -> sets gain of the 11th control with 0.8\n"
-		"  -m, --set-mute       mute/unmute volume controls(all controls except bass and treble) takes no arguments\n"
-		"                       Examples:\n"
-		"                       audio-mixer-test -m                       -> mutes the 1st control (default id)\n"
-		"                       audio-mixer-test -m                       -> unmutes the 1st control (default id), if it is issued after\n"
-		"                                                                    the above command\n"
-		"                       audio-mixer-test -i 9 -m                  -> mutes 9th control (Multimedia) with 0.8\n");
+		"  -i, --id             control id (serial#) of the control to apply volume changes to\n"
+		"  -v, --set-volume     Set volume level for a volume control (all controls except bass and treble)\n"
+		"                       This option sets volume for all the channels, see -l or -r for individual channels\n"
+		"                         Examples:\n"
+		"                         audio-mixer-test -v 0.2               -> sets volume (for all channels)\n"
+		"                                                                  of the 1st control (default id) to 0.2\n"
+		"                         audio-mixer-test -i 9 -v 0.2          -> sets volume of the 10th control to 0.2\n"
+		"  -l, --left-chan-vol  Set left channel volume for a volume control (all controls except bass and treble)\n"
+		"  -r, --right-chan-vol Set right channel volume for a volume control (all controls except bass and treble)\n"
+		"                       Only stereo channels are supported for now, and vol update on both the channels is required\n"
+		"                         Examples:\n"
+		"                         audio-mixer-test -l 0.2               -> gives an error as only one channel is updated\n"
+		"                         audio-mixer-test -l 0.1 -r 0.2        -> sets left channel volume to 0.1 and right channel volume\n"
+		"                                                                  to 0.2 on the 1st control (default id)\n"
+		"                         audio-mixer-test -i 9 -l 0.1 -r 0.2   -> sets left channel volume to 0.1 and right channel volume\n"
+		"                                                                  to 0.2 on the 10th control\n"
+		"  -g, --set-gain       Set gain level for gain controls like bass and treble\n"
+		"                         Examples:\n"
+		"                         audio-mixer-test -i 12 -g 0.8         -> sets gain of the 13th control to 0.8\n"
+		"  -m, --set-mute       mute/unmute volume controls (all controls except bass and treble)\n"
+		"                         Examples:\n"
+		"                         audio-mixer-test -m                   -> mutes or unmutes the 1st control (default id)\n"
+		"                                                                  depending on the previous mute state (toggle switch)\n"
+		"                         audio-mixer-test -i 9 -m              -> toggles mute on the 10th control\n");
 }
 
 static const struct option long_options[] = {
@@ -314,14 +310,14 @@ main (gint argc, gchar **argv)
 			id = atoi (optarg);
 			if (!(id >= 0 && id < self.nctrls)) {
 				ret = -1;
-				fprintf (stderr, "id(%d) is invalid\n", id);
+				fprintf (stderr, "id '%d' is invalid\n", id);
 			}
 			break;
 
 		case 'v':
 			vol = (double)atof (optarg);
 			if (id == -1) {
-				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
+				fprintf (stderr, "control id not given, defaulting it to 0 (Master Playback)\n");
 				id = 0;
 			}
 
@@ -336,7 +332,7 @@ main (gint argc, gchar **argv)
 
 		case 'l':
 			if (id == -1) {
-				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
+				fprintf (stderr, "control id not given, defaulting it to 0 (Master Playback)\n");
 				id = 0;
 			}
 
@@ -346,7 +342,7 @@ main (gint argc, gchar **argv)
 
 		case 'r':
 			if (id == -1) {
-				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
+				fprintf (stderr, "control id not given, defaulting it to 0 (Master Playback)\n");
 				id = 0;
 			}
 
@@ -356,7 +352,7 @@ main (gint argc, gchar **argv)
 
 		case 'm':
 			if (id == -1) {
-				fprintf (stderr, "control id not given defaulting it to 0(Master Playback)\n");
+				fprintf (stderr, "control id not given, defaulting it to 0 (Master Playback)\n");
 				id = 0;
 			}
 
@@ -372,7 +368,7 @@ main (gint argc, gchar **argv)
 		case 'g':
 			gain = atof (optarg);
 			if (id == -1) {
-				fprintf (stderr, "control id not given defaulting it to 11(bass)\n");
+				fprintf (stderr, "control id not given defaulting it to 11 (bass)\n");
 				id = 11; /* bass ctrl */
 			}
 
