@@ -1,6 +1,6 @@
 boost_dep = dependency('boost',
                        version : '>=1.72',
-                       modules : [ 'thread', 'filesystem', 'program_options', 'log', 'system' ])
+                       modules : [ 'thread', 'filesystem', 'program_options', 'log' ])
 wireplumber_dep = dependency('wireplumber-0.5')
 
 cpp = meson.get_compiler('cpp')
