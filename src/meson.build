@@ -1,13 +1,9 @@
-boost_dep = dependency('boost',
-                       version : '>=1.72',
-                       modules : [ 'thread', 'filesystem', 'program_options', 'log' ])
 wireplumber_dep = dependency('wireplumber-0.5')
 
 cpp = meson.get_compiler('cpp')
 grpcpp_reflection_dep = cpp.find_library('grpc++_reflection')
 
 service_dep = [
-    boost_dep,
     wireplumber_dep,
     dependency('openssl'),
     dependency('threads'),
